@@ -194,6 +194,77 @@ if (Test-Path $mtDir) {
     Write-Host "  solo hace falta si activas la traduccion" -ForegroundColor DarkGray
 }
 
+# --- voz sintetica (opcional) ------------------------------------------------
+# [speak] es una tabla TOML y sus claves (python, script) se llaman igual que
+# las de la raiz, asi que Get-Value se equivocaria: primero se recorta el
+# texto de la seccion y se busca solo dentro.
+$speakSection = [regex]::Match($config, "(?ms)^\[speak\].*?(?=^\[|\z)").Value
+function Get-SpeakValue($key) {
+    if (-not $speakSection) { return $null }
+    $m = [regex]::Match($speakSection, "(?m)^\s*$key\s*=\s*['""]?([^'""\r\n]+)['""]?")
+    if ($m.Success) { return $m.Groups[1].Value.Trim() }
+    return $null
+}
+
+Check "voz sintetica"
+if (-not $speakSection -or (Get-SpeakValue "enabled") -ne "true") {
+    Write-Host "DESACTIVADA" -ForegroundColor Yellow -NoNewline
+    Write-Host "  opcional; se activa en la app (seccion 'Hablar por mi')" -ForegroundColor DarkGray
+} else {
+    Pass "activada"
+
+    $speakPython = Get-SpeakValue "python"
+    Check "interprete del venv de voz"
+    if (-not $speakPython -or -not (Test-Path $speakPython)) {
+        Bad "no existe: $speakPython" "install.ps1 -WithVoice, o corrige [speak].python"
+    } else {
+        $spv = Invoke-Native $speakPython @("-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+        if ($spv.Code -ne 0) {
+            Bad "no arranca" "install.ps1 -WithVoice -Force"
+        } else {
+            Pass "Python $($spv.Output.Trim())"
+
+            # La sonda que de verdad separa "venv creado" de "venv utilizable".
+            Check "motores de voz"
+            $engines = Invoke-Native $speakPython @("-c", "import chatterbox.mtl_tts, kokoro; print('ok')")
+            if ($engines.Code -ne 0) {
+                Bad "chatterbox/kokoro no se pueden importar" "install.ps1 -WithVoice (las dependencias van en sidecar\requirements-tts.txt)"
+            } else {
+                Pass "chatterbox y kokoro importables"
+            }
+        }
+    }
+
+    Check "sidecar de voz"
+    $speakScript = Get-SpeakValue "script"
+    if (-not $speakScript) { $speakScript = "sidecar/tts_server.py" }
+    $abs = $speakScript
+    if (-not [System.IO.Path]::IsPathRooted($abs)) { $abs = Join-Path $Root $abs }
+    if (Test-Path $abs) { Pass $speakScript } else { Bad "no existe: $abs" "revisa [speak].script en la configuracion" }
+
+    if ((Get-SpeakValue "engine") -ne "kokoro") {
+        Check "muestra de voz a clonar"
+        $wav = Get-SpeakValue "voice_wav"
+        if ($wav -and (Test-Path $wav)) {
+            Pass $wav
+        } elseif ($wav) {
+            Bad "no existe: $wav" "elige el WAV en la app o corrige [speak].voice_wav"
+        } else {
+            Bad "sin configurar" "graba 10-30 s de tu voz y eligela en la app; chatterbox no arranca sin ella"
+        }
+    }
+
+    Check "modelo de voz"
+    $cbDir = Join-Path $hubRoot "models--ResembleAI--chatterbox"
+    if (Test-Path $cbDir) {
+        $size = (Get-ChildItem $cbDir -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB
+        Pass ("chatterbox {0:N2} GB" -f $size)
+    } else {
+        Write-Host "AUSENTE" -ForegroundColor Yellow -NoNewline
+        Write-Host "  se descarga solo al primer uso (~3,4 GB); install.ps1 -WithVoice lo deja bajado" -ForegroundColor DarkGray
+    }
+}
+
 # --- carpeta de salida -----------------------------------------------------
 Check "carpeta de salida"
 if ($outDir -and [System.IO.Path]::IsPathRooted($outDir)) {

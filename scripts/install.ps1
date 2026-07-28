@@ -16,6 +16,13 @@
 .PARAMETER SkipTranslator
     No descargar NLLB. Ahorra unos 2,4 GB si no vas a traducir.
 
+.PARAMETER WithVoice
+    Montar tambien la voz sintetica (hablar tu traduccion por un microfono
+    virtual). Es opt-in porque no es barata: un segundo entorno de Python con
+    su propio torch (~7 GB) mas los modelos de voz (~4 GB). El porque del
+    segundo entorno esta en sidecar/requirements-tts.txt: el ASR exige
+    transformers>=5.13 y chatterbox-tts esta probado con 4.57.x.
+
 .PARAMETER SkipBuild
     No compilar la aplicacion. Solo provisiona Python y los modelos.
 
@@ -34,12 +41,16 @@
 
 .EXAMPLE
     .\scripts\install.ps1 -ModelsDir D:\modelos -SkipTranslator
+
+.EXAMPLE
+    .\scripts\install.ps1 -WithVoice
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]$ModelsDir,
     [switch]$SkipTranslator,
+    [switch]$WithVoice,
     [switch]$SkipBuild,
     [switch]$SkipVerify,
     [switch]$InstallPython,
@@ -54,10 +65,14 @@ $ProgressPreference = "SilentlyContinue"
 $SupportedPython = @("3.12", "3.13", "3.11", "3.10")
 $TorchIndex = "https://download.pytorch.org/whl/cu128"
 $NeedGB = 15
+# La voz trae otro venv con su propio torch (~7 GB) y ~4 GB de modelos.
+if ($WithVoice) { $NeedGB = 27 }
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Venv = Join-Path $Root ".venv"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
+$VenvTts = Join-Path $Root ".venv-tts"
+$VenvTtsPython = Join-Path $VenvTts "Scripts\python.exe"
 
 $script:Step = 0
 $script:Warnings = @()
@@ -331,6 +346,82 @@ if ((Invoke-NativeLive $VenvPython $fetchArgs) -ne 0) {
 Write-Ok "modelos listos"
 
 # ---------------------------------------------------------------------------
+if ($WithVoice) {
+    Write-Step "Entorno de voz (chatterbox + kokoro)"
+
+    # Un venv APARTE del de los otros sidecars, y no es capricho: asr_server
+    # exige transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta
+    # probado con 4.57.x. Los dos conjuntos no caben en el mismo entorno.
+    if ((Test-Path $VenvTtsPython) -and -not $Force) {
+        Write-Ok "ya existe, se reutiliza"
+        Write-Info "usa -Force para rehacerlo desde cero"
+    } else {
+        if (Test-Path $VenvTts) {
+            Write-Info "borrando el anterior..."
+            Remove-Item $VenvTts -Recurse -Force
+        }
+        if ((Invoke-NativeLive $python @("-m", "venv", $VenvTts)) -ne 0) {
+            Fail "no se pudo crear el entorno de voz"
+        }
+        Write-Ok "creado en .venv-tts"
+    }
+
+    if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel")) -ne 0) {
+        Fail "no se pudo actualizar pip en el entorno de voz"
+    }
+
+    $probe = Invoke-Native $VenvTtsPython @("-c", "import torch; print(torch.__version__)") -Quiet
+    if ($probe.Code -eq 0 -and -not $Force) {
+        Write-Ok "torch ya instalado: $($probe.Output.Trim())"
+    } else {
+        Write-Info "descargando torch para la voz (~2,8 GB, tarda un rato)..."
+        if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "torch", "torchaudio", "--index-url", $TorchIndex)) -ne 0) {
+            Fail "no se pudo instalar torch en el entorno de voz"
+        }
+        Write-Ok "torch instalado"
+    }
+
+    $reqTts = Join-Path $Root "sidecar\requirements-tts.txt"
+    if (-not (Test-Path $reqTts)) { Fail "no encuentro $reqTts" }
+    if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "-r", $reqTts)) -ne 0) {
+        Fail "no se pudieron instalar las dependencias de voz"
+    }
+    # --no-deps A PROPOSITO: chatterbox-tts pina torch==2.6 y transformers
+    # exactos que aqui no valen; sin esto, pip reinstalaria torch sin CUDA.
+    # Sus dependencias reales ya vienen de requirements-tts.txt.
+    if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "--no-deps", "chatterbox-tts")) -ne 0) {
+        Fail "no se pudo instalar chatterbox-tts"
+    }
+
+    # La sonda de verdad: importar los dos motores. Instalar en limpio es
+    # justo donde aparecen las dependencias que faltan en la lista.
+    $engines = Invoke-Native $VenvTtsPython @("-c", "import chatterbox.mtl_tts, kokoro; print('ok')") -Quiet
+    if ($engines.Code -ne 0) {
+        Fail "los motores de voz no se pueden importar; mira: $VenvTtsPython -c `"import chatterbox.mtl_tts, kokoro`""
+    }
+    Write-Ok "motores importables (chatterbox, kokoro)"
+
+    # Los pesos multilingues de chatterbox y kokoro entero. Solo los ficheros
+    # que se usan: el repo de chatterbox trae ademas los pesos solo-ingles,
+    # que no tocamos. Respeta HF_HOME si se movio la cache con -ModelsDir.
+    Write-Info "descargando los modelos de voz (~4 GB la primera vez)..."
+    $dlScript = @"
+from huggingface_hub import snapshot_download
+snapshot_download('ResembleAI/chatterbox', allow_patterns=[
+    '*.json', '*.txt', 'conds.pt', 't3_mtl23ls_v2.safetensors', 's3gen.pt', 've.pt',
+])
+snapshot_download('hexgrad/Kokoro-82M')
+print('modelos de voz en cache')
+"@
+    if ((Invoke-NativeLive $VenvTtsPython @("-c", $dlScript)) -ne 0) {
+        Fail "no se pudieron descargar los modelos de voz"
+    }
+    Write-Ok "modelos de voz listos"
+    Write-Info "la voz se activa en la app (seccion 'Hablar por mi'); para el"
+    Write-Info "microfono virtual hace falta ademas VB-CABLE: https://vb-audio.com/Cable/"
+}
+
+# ---------------------------------------------------------------------------
 Write-Step "Configuracion"
 
 $configPath = Join-Path $Root "transcriber-config.toml"
@@ -372,9 +463,28 @@ $lines += @(
     'output_name = "transcripcion"'
 )
 
+# La tabla [speak] va la ultima: en TOML no puede haber claves de raiz
+# despues de una tabla.
+if ($WithVoice) {
+    $lines += @(
+        "",
+        "# Voz sintetica: hablar tu traduccion por un microfono virtual. Se",
+        "# activa desde la app (seccion 'Hablar por mi'), donde tambien se",
+        "# elige el WAV con tu voz; sin el, chatterbox no arranca.",
+        "[speak]",
+        "enabled = false",
+        'engine = "chatterbox"',
+        "python = '$VenvTtsPython'",
+        'script = "sidecar/tts_server.py"'
+    )
+}
+
 if ((Test-Path $configPath) -and -not $Force) {
     Write-Ok "ya existe, no se toca"
     Write-Info "usa -Force para regenerarla con los valores detectados"
+    if ($WithVoice) {
+        Write-Info "el interprete de voz para la app es: $VenvTtsPython"
+    }
 } else {
     $lines | Out-File -Encoding utf8 $configPath
     Write-Ok "escrita transcriber-config.toml"
@@ -444,6 +554,9 @@ if ($script:Warnings.Count -gt 0) {
 Write-Host ""
 Write-Host "  Arrancar en desarrollo:  npm run app:dev"
 Write-Host "  Probar sin interfaz:     cargo run -p asr-cli -- devices"
+if ($WithVoice) {
+    Write-Host "  Probar la voz:           cargo run -p asr-cli -- speak --engine kokoro --lang es --text `"hola`" --python .venv-tts\Scripts\python.exe"
+}
 Write-Host ""
 Write-Host "  Sube el volumen de Windows antes de probar: el bucle de retorno" -ForegroundColor DarkGray
 Write-Host "  captura despues del control de volumen." -ForegroundColor DarkGray

@@ -11,7 +11,9 @@ dist
 
 # Python. Sin barra final a proposito: con `.venv/` el patron solo casa con un
 # directorio que ya exista, y aqui el venv son ~4,7 GB que no deben colarse.
+# `.venv-tts` es el entorno de la voz (install.ps1 -WithVoice), otros ~7 GB.
 .venv
+.venv-tts
 venv
 __pycache__/
 *.pyc

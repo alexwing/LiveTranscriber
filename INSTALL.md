@@ -11,6 +11,7 @@ Solo dos cosas, y ninguna la instala el script:
 |---|---|---|
 | **Driver de NVIDIA** | PyTorch necesita CUDA 12.8 | [nvidia.com/drivers](https://www.nvidia.com/Download/index.aspx) |
 | **~15 GB libres** | 4 GB de PyTorch + 7 GB de modelos | — |
+| **~27 GB con `-WithVoice`** | la voz añade otro venv con su torch (~7 GB) y ~4 GB de modelos | — |
 
 Python lo instala el script si le pasas `-InstallPython`. Rust y Node solo hacen
 falta si quieres **compilar** la aplicación; para provisionar el modelo no.
@@ -33,8 +34,14 @@ Si el disco C: va justo, los modelos a otro sitio:
 cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -ModelsDir D:\modelos
 ```
 
+Con la voz sintética (hablar tu traducción por un micrófono virtual):
+
+```bash
+cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -WithVoice
+```
+
 Se puede volver a ejecutar sin romper nada: reutiliza lo que ya esté. Con
-`-Force` rehace el entorno virtual y regenera la configuración.
+`-Force` rehace los entornos virtuales y regenera la configuración.
 
 ### Opciones
 
@@ -42,10 +49,11 @@ Se puede volver a ejecutar sin romper nada: reutiliza lo que ya esté. Con
 |---|---|
 | `-ModelsDir <ruta>` | Modelos fuera de `%USERPROFILE%\.cache`. Escribe `hf_home` en la configuración |
 | `-SkipTranslator` | No bajar NLLB. Ahorra ~2,4 GB si no vas a traducir |
+| `-WithVoice` | Montar la voz sintética (hablar tu traducción por un micrófono virtual). Es opt-in porque cuesta ~11 GB más |
 | `-SkipBuild` | No compilar la app. Solo Python y modelos |
 | `-SkipVerify` | Saltarse la comprobación final. No recomendado |
 | `-InstallPython` | Instalar Python 3.12 con winget si no hay ninguno válido |
-| `-Force` | Rehacer entorno virtual y configuración |
+| `-Force` | Rehacer entornos virtuales y configuración |
 
 ## Qué hace, por orden
 
@@ -57,18 +65,25 @@ Se puede volver a ejecutar sin romper nada: reutiliza lo que ya esté. Con
 4. **Verifica que la rueda sirve para tu tarjeta.** `cu128` trae de `sm_75`
    hacia arriba, así que cubre desde Turing (RTX 20xx) pero **no** una GTX 10xx.
    Si no encaja, para y lo dice, en vez de fallar luego en tiempo de ejecución.
-5. **Instala las dependencias de los sidecars.** Son cuatro: `transformers`,
-   `numpy`, `huggingface_hub` y `torch`. Nada de librerías de audio — eso lo hace
-   Rust.
+5. **Instala las dependencias de los sidecars** desde `sidecar\requirements.txt`
+   (`transformers`, `numpy`, `huggingface_hub` y `librosa` — esta última no la
+   usamos nosotros, la exige el extractor de rasgos del modelo al importarse).
 6. **Descarga los modelos** cargándolos de verdad, no con un `snapshot_download`.
    Así baja solo lo que usa transformers (el repo del ASR incluye además un
    `.nemo` de 2,4 GB que no tocamos) y de paso se comprueba que los pesos están
    bien.
-7. **Escribe `transcriber-config.toml`** con rutas absolutas y la precisión que
-   corresponda.
-8. **Compila la aplicación** si hay Rust y Node, dejando el instalador en
+7. **(Con `-WithVoice`) Monta el entorno de voz**: un **segundo** venv en
+   `.venv-tts` con su propio torch, las dependencias de
+   `sidecar\requirements-tts.txt` y `chatterbox-tts` instalado `--no-deps` (sus
+   pines reinstalarían un torch sin CUDA). No comparte venv con el ASR porque no
+   pueden: el ASR exige `transformers>=5.13` y chatterbox está probado con
+   4.57.x. Prueba que los dos motores importan y baja sus modelos (los pesos
+   multilingües de chatterbox y kokoro entero).
+8. **Escribe `transcriber-config.toml`** con rutas absolutas y la precisión que
+   corresponda (y la sección `[speak]` si hubo `-WithVoice`).
+9. **Compila la aplicación** si hay Rust y Node, dejando el instalador en
    `target\release\bundle`.
-9. **Verifica**, y esto es lo que importa.
+10. **Verifica**, y esto es lo que importa.
 
 ## La precisión se elige sola, y hay un motivo
 
@@ -98,6 +113,8 @@ Así que el reparto es:
 | Aplicación (ventana, captura, bandeja) | el `.msi` | pocos MB |
 | Python + PyTorch | `install.ps1` | ~4 GB |
 | Modelos | `install.ps1` | ~7 GB |
+| Voz sintética (venv propio + modelos) | `install.ps1 -WithVoice` | ~11 GB |
+| VB-CABLE (micrófono virtual) | a mano, [vb-audio.com/Cable](https://vb-audio.com/Cable/) | 1 MB |
 
 El `.msi` lleva los sidecars de Python dentro como recursos del bundle, así que la
 app los encuentra sola. Lo que necesita es un intérprete con las dependencias, y esa
@@ -118,6 +135,8 @@ máquina**:
 %USERPROFILE%\.cache\huggingface\hub\
     models--nvidia--nemotron-3.5-asr-streaming-0.6b\    2,4 GB
     models--facebook--nllb-200-distilled-600M\          4,6 GB
+    models--ResembleAI--chatterbox\                     3,4 GB   (solo -WithVoice)
+    models--hexgrad--Kokoro-82M\                        0,4 GB   (solo -WithVoice)
 ```
 
 Eso tiene una consecuencia útil: si ya los tenías de otro proyecto, el instalador
@@ -149,6 +168,12 @@ No mide calidad de transcripción: le manda un tono, no voz. Que no salga texto 
 lo normal y lo dice. Lo que comprueba es que la tubería entera funciona, que es
 donde están los fallos de instalación.
 
+Si la voz sintética está activada en la configuración, comprueba también sus
+piezas: el venv de voz arranca, chatterbox y kokoro importan, el sidecar existe,
+hay un WAV de voz elegido, y el modelo está en caché (esto último en amarillo si
+falta: se descarga solo al primer uso). Desactivada, lo dice y no cuenta como
+fallo — es opcional.
+
 ## Arrancar
 
 ```bash
@@ -170,3 +195,5 @@ el susto.
 | Transcribe muy poco o nada | Volumen de Windows bajo. `cargo run -p asr-cli -- level --from system` lo dice en dos segundos |
 | Va lentísimo | Precisión emulada. Comprueba `dtype` con `verify.ps1` |
 | No cierra párrafos | Si hay música de fondo es normal que tarde: el corte espera a que el modelo deje de transcribir. Baja `paragraph_idle_secs` |
+| `el sintetizador no arranco` | El motivo está en el log, líneas `sintetizador`. Lo típico: falta el WAV de la voz, o el venv de voz no tiene los motores (`verify.ps1` lo comprueba) |
+| La voz habla pero la reunión no oye | El TTS está saliendo por los altavoces en vez de por `CABLE Input`, o Teams no tiene `CABLE Output` como micrófono. Ojo: al instalarse, VB-CABLE se pone como **salida predeterminada** de Windows; devuelve esa a tus altavoces |

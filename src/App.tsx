@@ -11,6 +11,8 @@ import {
   SPLITS,
   SessionEvent,
   Source,
+  SpeakConfig,
+  SpeechEvent,
   Split,
   Tab,
   TranslatedLine,
@@ -35,6 +37,10 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  /// Cola de la voz sintetica. `null` = la voz no esta en marcha. El retraso
+  /// acumulado es EL dato a vigilar: si crece sin parar, hablas mas rapido de
+  /// lo que el sintetizador genera.
+  const [speech, setSpeech] = useState<{ pending: number; queuedMs: number } | null>(null);
   /// Ruta efectiva que devuelve Rust, que puede no ser la del TOML si la
   /// configurada era relativa.
   const [outputDir, setOutputDir] = useState("");
@@ -116,7 +122,29 @@ export default function App() {
       listen<{ device: string; target: string }>("translator-ready", ({ payload }) =>
         setStatus(`Traductor listo en ${payload.device}, destino ${payload.target}`)
       ),
-      listen<boolean>("running-changed", ({ payload }) => setRunning(payload)),
+      listen<SpeechEvent>("speech-event", ({ payload }) => {
+        switch (payload.kind) {
+          case "ready":
+            setStatus(`Voz sintetica lista en ${payload.device}`);
+            setSpeech({ pending: 0, queuedMs: 0 });
+            break;
+          case "queue":
+            setSpeech({ pending: payload.pending_texts, queuedMs: payload.queued_ms });
+            break;
+          case "spoke":
+            break; // la cola ya lo refleja
+          case "error":
+            setError(payload.message);
+            break;
+          case "stopped":
+            setSpeech(null);
+            break;
+        }
+      }),
+      listen<boolean>("running-changed", ({ payload }) => {
+        setRunning(payload);
+        if (!payload) setSpeech(null);
+      }),
       listen<string>("error", ({ payload }) => setError(payload)),
     ];
     return () => {
@@ -202,6 +230,10 @@ export default function App() {
 
   const lowVolume = Object.values(levels).some((l) => l?.ceiling);
   const autoBlocksTranslation = config.translate && config.language === "auto";
+  const speakMisconfigured =
+    config.speak.enabled && (!config.translate || !config.capture_mic);
+  // Con mas de ~10 s de retraso la conversacion deja de ser conversacion.
+  const speechBehind = speech !== null && speech.queuedMs > 10_000;
 
   return (
     <main className="app">
@@ -240,6 +272,21 @@ export default function App() {
           El volumen de Windows esta muy bajo. El bucle de retorno captura
           <em> despues </em> del control de volumen, asi que la transcripcion saldra
           pobre aunque la ganancia ya este al maximo.
+        </p>
+      )}
+      {speakMisconfigured && (
+        <p className="warn">
+          Hablar con tu voz necesita <em>Traducir en paralelo</em> y{" "}
+          <em>Mi microfono</em> activados: lo que se habla es la traduccion de lo
+          que dices por el micro.
+        </p>
+      )}
+      {speech !== null && running && (
+        <p className={speechBehind ? "warn" : "status"}>
+          Voz sintetica: {(speech.queuedMs / 1000).toFixed(1)} s en cola
+          {speech.pending > 0 ? ` · ${speech.pending} frases esperando` : ""}
+          {speechBehind &&
+            " — se esta generando mas despacio de lo que hablas; haz una pausa o agrupa mas caracteres"}
         </p>
       )}
 
@@ -529,7 +576,183 @@ function ConfigPane({
           traduccion.
         </p>
       </section>
+
+      <SpeakPane config={config} outputs={outputs} running={running} patch={patch} />
     </div>
+  );
+}
+
+/// Seccion de la voz sintetica. Es una funcion opcional entera: se activa
+/// aqui, independiente del resto, y apagada no cuesta nada (ni proceso ni
+/// VRAM). Habla SOLO la traduccion de lo que dices por el microfono.
+function SpeakPane({
+  config,
+  outputs,
+  running,
+  patch,
+}: {
+  config: AppConfig;
+  outputs: AudioDevice[];
+  running: boolean;
+  patch: (c: Partial<AppConfig>) => void;
+}) {
+  const speak = config.speak;
+  const patchSpeak = (changes: Partial<SpeakConfig>) =>
+    patch({ speak: { ...speak, ...changes } });
+
+  const cable = outputs.find((d) => d.name.toLowerCase().includes("cable input"));
+
+  return (
+    <section className="panel">
+      <h2>Hablar por mi</h2>
+      <label className="row">
+        <input
+          type="checkbox"
+          checked={speak.enabled}
+          disabled={running}
+          onChange={(e) => patchSpeak({ enabled: e.target.checked })}
+        />
+        <span>Pronunciar mi traduccion por un dispositivo de salida</span>
+      </label>
+      <p className="note">
+        Lo que dices por el microfono, ya traducido, sale hablado por el
+        dispositivo elegido. Con VB-CABLE como dispositivo y{" "}
+        <code>CABLE Output</code> como microfono de la reunion, los demas te
+        oyen en su idioma. Necesita <em>Traducir en paralelo</em> y{" "}
+        <em>Mi microfono</em> activados.
+      </p>
+
+      <label className="field">
+        <span>Motor</span>
+        <select
+          disabled={running || !speak.enabled}
+          value={speak.engine}
+          onChange={(e) =>
+            patchSpeak({ engine: e.target.value as SpeakConfig["engine"] })
+          }
+        >
+          <option value="chatterbox">Chatterbox — mi voz clonada (23 idiomas)</option>
+          <option value="kokoro">Kokoro — voz neutra (8 idiomas, mas ligero)</option>
+        </select>
+      </label>
+
+      {speak.engine === "chatterbox" ? (
+        <>
+          <label className="field">
+            <span>Muestra de mi voz</span>
+            <input
+              type="text"
+              className="text-input"
+              disabled={running || !speak.enabled}
+              value={speak.voice_wav ?? ""}
+              placeholder={"C:\\...\\mi-voz.wav"}
+              onChange={(e) => patchSpeak({ voice_wav: e.target.value || null })}
+            />
+          </label>
+          <p className="note">
+            Un WAV con 10-30 segundos de tu habla, limpia y sin ruido de fondo.
+            La voz clonada imita el tono de la muestra: si la muestra es
+            monotona, la voz tambien lo sera.
+          </p>
+        </>
+      ) : (
+        <>
+          <label className="field">
+            <span>Voz preajustada</span>
+            <input
+              type="text"
+              className="text-input"
+              disabled={running || !speak.enabled}
+              value={speak.kokoro_voice}
+              placeholder="af_heart"
+              onChange={(e) => patchSpeak({ kokoro_voice: e.target.value })}
+            />
+          </label>
+          <p className="note">
+            El prefijo dice idioma y genero: <code>af_heart</code> (ingles, f),{" "}
+            <code>am_adam</code> (ingles, m), <code>ef_dora</code> (espanol, f),{" "}
+            <code>em_alex</code> (espanol, m)…
+          </p>
+        </>
+      )}
+
+      <label className="field">
+        <span>Hablar por</span>
+        <select
+          disabled={running || !speak.enabled}
+          value={speak.output_device_id ?? ""}
+          onChange={(e) => patchSpeak({ output_device_id: e.target.value || null })}
+        >
+          <option value="">Dispositivo predeterminado (los altavoces)</option>
+          {outputs.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+              {d.is_default ? " (predeterminado)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      {speak.enabled && !cable && (
+        <p className="note">
+          No se ve ningun <code>CABLE Input</code>: para que la reunion te oiga
+          sin que suene por los altavoces hace falta{" "}
+          <a href="https://vb-audio.com/Cable/" target="_blank" rel="noreferrer">
+            VB-CABLE
+          </a>
+          , un dispositivo virtual que se instala aparte.
+        </p>
+      )}
+
+      <label className="row">
+        <input
+          type="checkbox"
+          checked={speak.mark_echo}
+          disabled={running || !speak.enabled}
+          onChange={(e) => patchSpeak({ mark_echo: e.target.checked })}
+        />
+        <span>Reconocer mi propia voz sintetica si vuelve por el sistema</span>
+      </label>
+      <p className="note">
+        Si la reunion devuelve tu voz sintetica, la transcripcion la volveria a
+        traducir (espanol → ingles → espanol sale raro). Con esto se detecta y
+        se marca como eco en vez de re-traducirla.
+      </p>
+
+      <label className="field">
+        <span>Agrupar frases</span>
+        <select
+          disabled={running || !speak.enabled}
+          value={speak.group_max_chars}
+          onChange={(e) => patchSpeak({ group_max_chars: Number(e.target.value) })}
+        >
+          {[150, 250, 350, 500].map((v) => (
+            <option key={v} value={v}>
+              {v} caracteres
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Espera maxima</span>
+        <select
+          disabled={running || !speak.enabled}
+          value={speak.group_max_wait_ms}
+          onChange={(e) => patchSpeak({ group_max_wait_ms: Number(e.target.value) })}
+        >
+          {[1000, 2000, 3000, 5000].map((v) => (
+            <option key={v} value={v}>
+              {v / 1000} s
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="note">
+        Clonar tiene un coste fijo por peticion (~1 s medido): con frases
+        sueltas la voz genera mas despacio de lo que hablas y el retraso crece
+        sin parar; agrupando ~250 caracteres queda acotado. Menos espera = sale
+        antes pero rinde menos.
+      </p>
+    </section>
   );
 }
 
@@ -684,6 +907,7 @@ function TranslatedList({
           who={line.source}
           text={line.translated}
           translated
+          echo={line.echo}
           onCopy={onCopy}
         />
       ))}
@@ -716,9 +940,12 @@ function CombinedList({
             time={formatClock(line.at_ms)}
             who={line.source}
             text={line.original}
+            echo={line.echo}
             onCopy={onCopy}
           />
-          <Paragraph text={line.translated} translated onCopy={onCopy} />
+          {/* Un eco no lleva traduccion: es la propia voz, ya en el idioma
+              destino, y re-traducirla es justo lo que se evita. */}
+          {!line.echo && <Paragraph text={line.translated} translated onCopy={onCopy} />}
         </div>
       ))}
       {(["system", "mic"] as Source[]).map(
@@ -780,19 +1007,28 @@ function Paragraph({
   who,
   text,
   translated,
+  echo,
   onCopy,
 }: {
   time?: string;
   who?: Source;
   text: string;
   translated?: boolean;
+  /** La propia voz sintetica volviendo por el sistema: atenuada y etiquetada. */
+  echo?: boolean;
   onCopy: (text: string) => void;
 }) {
   return (
-    <p className={`line ${who ?? ""} ${translated ? "translated" : ""}`}>
+    <p className={`line ${who ?? ""} ${translated ? "translated" : ""} ${echo ? "echo" : ""}`}>
       {time && <span className="time">{time}</span>}
-      {who && <span className="who">{who === "system" ? "sistema" : "micro"}</span>}
-      {translated && <span className="arrow">→</span>}
+      {echo ? (
+        <span className="who" title="Tu voz sintetica captada de vuelta por el sistema">
+          tu voz
+        </span>
+      ) : (
+        who && <span className="who">{who === "system" ? "sistema" : "micro"}</span>
+      )}
+      {translated && !echo && <span className="arrow">→</span>}
       {text}
       <button className="copy-line" title="Copiar este parrafo" onClick={() => onCopy(text)}>
         ⧉

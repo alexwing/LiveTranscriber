@@ -190,6 +190,12 @@ pub struct TranslatedLine {
     pub at_ms: u64,
     pub original: String,
     pub translated: String,
+    /// La frase es la propia voz sintetica volviendo por la captura del
+    /// sistema. No se re-traduce (es->en->es produce cosas raras): se deja
+    /// tal cual y la interfaz la marca. `default` para que los TOML e
+    /// historiales de antes de este campo sigan cargando.
+    #[serde(default)]
+    pub echo: bool,
 }
 
 /// Convierte el flujo de eventos de sesion en traducciones.
@@ -214,6 +220,9 @@ pub struct TranslationPump {
     next_paragraph: u64,
     src: String,
     tgt: String,
+    /// Memoria de lo que la voz sintetica acaba de decir. Solo cuando la voz
+    /// esta activada; ver [`crate::speak::EchoRegistry`].
+    echo: Option<std::sync::Arc<crate::speak::EchoRegistry>>,
 }
 
 #[derive(Default)]
@@ -246,7 +255,19 @@ impl TranslationPump {
             next_paragraph: 1,
             src: src.to_string(),
             tgt: tgt.to_string(),
+            echo: None,
         })
+    }
+
+    /// Activa el reconocimiento de la propia voz sintetica. Las frases del
+    /// sistema que coincidan con algo recien hablado se marcan como eco en
+    /// vez de re-traducirse.
+    pub fn with_echo_registry(
+        mut self,
+        registry: std::sync::Arc<crate::speak::EchoRegistry>,
+    ) -> Self {
+        self.echo = Some(registry);
+        self
     }
 
     pub fn handle(&mut self, event: &crate::session::SessionEvent) -> Vec<TranslatedLine> {
@@ -296,6 +317,27 @@ impl TranslationPump {
     ) -> Vec<TranslatedLine> {
         let mut out = Vec::new();
         for sentence in sentences {
+            // La propia voz sintetica volviendo no se re-traduce: es->en->es
+            // nunca devuelve lo que se dijo. Se deja la frase tal cual,
+            // marcada, y la interfaz decide como pintarla. Se comprueba en
+            // LAS DOS fuentes a proposito: por el sistema vuelve cuando la
+            // reunion la reenvia, y por el MICROFONO cuando suena por los
+            // altavoces (la salida predeterminada) y el micro la recoge —
+            // ese caso ademas se volveria a hablar, y eso es un bucle de
+            // realimentacion hablandose a si mismo.
+            if let Some(echo) = &self.echo {
+                if echo.matches(&sentence) {
+                    out.push(TranslatedLine {
+                        source,
+                        paragraph,
+                        at_ms,
+                        translated: sentence.clone(),
+                        original: sentence,
+                        echo: true,
+                    });
+                    continue;
+                }
+            }
             match self.translator.translate(&sentence, &self.src, &self.tgt) {
                 Ok(translated) => out.push(TranslatedLine {
                     source,
@@ -303,6 +345,7 @@ impl TranslationPump {
                     at_ms,
                     original: sentence,
                     translated,
+                    echo: false,
                 }),
                 // Una frase que falla no debe tirar el parrafo entero.
                 Err(e) => tracing::warn!("no se pudo traducir {sentence:?}: {e}"),

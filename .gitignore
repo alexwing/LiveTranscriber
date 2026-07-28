@@ -22,9 +22,12 @@ __pycache__/
 transcriber-config.toml
 
 # Transcripciones exportadas: son contenido de quien use la app, no del repo.
+# La excepcion cubre requirements.txt Y requirements-tts.txt: con solo el
+# primero, la receta del venv de voz quedaba invisible para git y un
+# `git add -A` la dejaba fuera sin ningun aviso.
 *.srt
 *.txt
-!requirements.txt
+!requirements*.txt
 
 *.log
 .DS_Store

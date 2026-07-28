@@ -7,6 +7,76 @@ Todo lo que se afirma abajo está **medido en esta máquina** (RTX 3060 12 GB,
 Windows 11) contra el backend de voicebox en `E:\projects\voicebox`, no copiado de
 documentación.
 
+## Estado: implementado (fases 1-4)
+
+Está construido y verificado hasta la fase 4. La función es **opcional entera**:
+sección `[speak]` propia en el TOML, panel "Hablar por mi" propio en la interfaz,
+y apagada no cuesta nada (ni proceso ni VRAM). Exige traducción + micro, porque
+lo que se pronuncia es la traducción del micro; las frases de los demás nunca.
+
+| pieza | dónde | verificado |
+|---|---|---|
+| Salida WASAPI | `asr-audio/src/render.rs` | reproduce por el dispositivo elegido, autoconvert desde 24 kHz mono |
+| Trait + sidecar + agrupador + eco | `asr-core/src/speak.rs` | 10 tests + protocolo real |
+| Sidecar de voz | `sidecar/tts_server.py` | kokoro 103 ms en caliente; chatterbox de punta a punta |
+| Cableado + eventos | `src-tauri/src/lib.rs` | compila; cadena de apagado por canales |
+| Interfaz | `App.tsx` (SpeakPane), `tauri.ts` | tsc limpio; cola visible; eco atenuado |
+| CLI | `asr-cli speak` | **circuito completo medido**: kokoro es, 5,15 s de audio en 1.233 ms (4,18x), reproducido por WASAPI exactamente en 5,15 s |
+
+Tras implementar se pasó una revisión adversarial multi-agente (6 lentes +
+verificación con reproducción) y una prueba de transcripción de vuelta. Lo que
+salió y quedó arreglado: **chatterbox trunca bloques multi-frase por lotería de
+la semilla** (aislado con una matriz de 8 ejecuciones: solo la semilla importa;
+arreglado con detección por ms/carácter — completo 47,6, truncado 30,8, umbral
+38 — y reintento quedándose el audio más largo, verificado transcribiendo de
+vuelta); **la muerte del dispositivo de salida era silenciosa** (ahora hay
+handshake de arranque que hace fallar el arranque con mensaje claro, y la bomba
+avisa con error si el render muere a mitad); **"Parar" no callaba la voz**
+(ahora hay asidero de parada: lo pendiente se descarta al parar, y se evita
+superponer dos sintetizadores en un parar-y-arrancar rápido); el **eco se
+comprueba en ambas fuentes** (por el micro también: si la voz suena por
+altavoces, el micro la recoge y sin esto se re-hablaría a sí misma en bucle);
+más validación del WAV de referencia al arrancar, detección de audio NaN,
+precalentamiento de la voz de kokoro, y el `.gitignore` que se tragaba
+`requirements-tts.txt`.
+
+Tres cosas que salieron al probar de verdad, ninguna estaba en el plan:
+
+1. **numba/SVML mata el proceso** también aquí (el `LLVM ERROR: __svml_cosf8_ha`
+   de esta máquina): `prepare_conditionals` pasa por librosa. El sidecar se
+   blinda solo (`NUMBA_DISABLE_INTEL_SVML=1` antes de los imports), porque no
+   puede depender del entorno de quien lo lance.
+2. **Chatterbox imprime a stdout durante `generate`** (`loaded PerthNet...`), y
+   una línea suelta rompía el protocolo de una-línea-JSON. El sidecar duplica el
+   stdout real para el protocolo y redirige el fd 1 a stderr: ningún print de
+   ninguna librería puede volver a tocarlo.
+3. **Sin el parche de atención `eager`** el analizador de alineación de
+   chatterbox se queda sin pesos (sdpa ignora `output_attentions`) y el proceso
+   unas veces genera y otras muere sin traceback. Es el mismo parche que aplica
+   voicebox; reproducido y aplicado.
+
+**El circuito del micrófono virtual está verificado de punta a punta** con
+VB-CABLE instalado (Pack 45, firma de Vincent Burel comprobada): la voz clonada
+entró por `CABLE Input` y el propio ASR de Nemotron, escuchando `CABLE Output`,
+la transcribió **palabra por palabra, puntuación incluida** (8,36 s de audio a
+RTFx 1,00x). Es decir: lo que oiría Teams es exactamente lo que se dijo.
+
+Esa prueba destapó además la **causa raíz del truncado**, que no era solo
+lotería: en `alignment_stream_analyzer.py` de chatterbox el corte por
+"repetición excesiva de tokens" dice en su comentario *3x same token in a row*
+pero el código mira solo los DOS últimos, y la guarda `self.complete and` está
+comentada en la propia librería. Dos tokens de silencio idénticos —una pausa
+entre frases— decapitan el audio en mitad de la generación. Un texto con la
+primera frase corta moría 3 de 3 veces en el mismo sitio. `tts_server.py` lo
+neutraliza recortando la ventana de tokens antes de cada paso (los detectores
+de alineación buenos siguen activos), y el reintento por ms/carácter queda como
+red. Ojo: **voicebox tiene el mismo bug latente** en sus generaciones largas.
+
+Pendiente (fase 5): `install.ps1` con el segundo venv (`requirements-tts.txt` ya
+existe y documenta por qué no cabe en el venv del ASR), `verify.ps1` e
+`INSTALL.md`. Y la prueba social: una reunión real de Teams con `CABLE Output`
+como micrófono.
+
 ## Qué motor y por qué
 
 Medido con un backend recién arrancado por motor (para que ninguno herede la VRAM
@@ -55,21 +125,39 @@ medidos) y falla ~0,5 s en los cortos, así que es aproximado. Pero deja claro
 dónde está el problema: **el 0,84x de las frases cortas es casi todo ese segundo
 fijo.**
 
-### De dónde sale ese segundo, y cómo quitarlo
+### De dónde sale ese segundo (medido)
 
 En voicebox, `chatterbox_backend.py` guarda el prompt de voz como una simple ruta
 y devuelve `False` (no cacheado), y luego pasa `audio_prompt_path=ref_audio` a
-`model.generate()` **en cada llamada**. Chatterbox re-codifica el audio de
+`model.generate()` **en cada llamada**, así que Chatterbox re-codifica el audio de
 referencia en cada frase.
 
-En nuestro sidecar eso es evitable: llamar a `prepare_conditionals()` **una vez al
-arrancar** y después `generate(text)` sin `audio_prompt_path`. Si elimina el
-coste fijo, una frase corta pasaría de 0,84x a ~1,09x, sostenible incluso por
-frase suelta.
+Se midió si evitarlo recupera el coste fijo, llamando al modelo directamente con
+el WAV de referencia real, misma semilla y mismos parámetros que usa el backend:
 
-**Esto es una hipótesis derivada de mis medidas, no algo verificado.** Medirlo es
-la primera tarea de la fase 2, y si no se cumple, la mitigación es el agrupador de
-la fase 3.
+| estrategia | por frase | audio | RTFx |
+|---|---:|---:|---:|
+| `audio_prompt_path` en cada llamada | 4.015 ms | 3,88 s | 0,97x |
+| `prepare_conditionals()` una vez | **3.771 ms** | 3,88 s | **1,03x** |
+
+**El ahorro es de 244 ms (6%), no del segundo entero que sugería el ajuste.** La
+re-codificación del prompt de voz cuesta ~0,24 s; el resto del coste fijo está en
+el arranque del decodificador autorregresivo y el códec, y no se quita cacheando
+nada.
+
+Aun así merece la pena hacerlo: es **una sola llamada al arrancar** y cruza el
+umbral de 1,0x, que es justo el signo que decide si el retardo se acota o crece.
+
+Segundo hallazgo de la misma medida: la API directa da **4.015 ms** frente a los
+**4.435 ms** de voicebox por HTTP. Esos ~420 ms son su capa (normalizado, cadena
+de efectos, codificación WAV, transporte HTTP). Sumado al cacheo, **nuestro propio
+sidecar rinde ~15% mejor** que llamar a voicebox: 3.771 ms frente a 4.435 ms. Es
+el argumento cuantitativo para la fase 2 y contra quedarse en el sondeo HTTP.
+
+Nota de robustez observada durante la prueba: Chatterbox emitió
+`Detected 2x repetition of token` y forzó EOS. Voicebox tiene un detector de
+descarrilamiento (`engine_retries_runaway`) precisamente para esto; nuestro
+sidecar necesita algo equivalente o alguna frase saldrá cortada.
 
 ## Arquitectura
 
@@ -217,9 +305,10 @@ un comando de `asr-cli` que reproduzca un `.wav` en él. Verificable sin ningún
 modelo: si suena en `CABLE Input` y Teams lo oye por `CABLE Output`, la fase está
 cerrada.
 
-**Fase 2 — `tts_server.py` + `PythonTtsSidecar`.** Primero medir la hipótesis de
-`prepare_conditionals` (una sola vez al arrancar frente a por llamada) y decidir
-si el agrupador es necesario. Comando `asr-cli speak --text ... --lang en`.
+**Fase 2 — `tts_server.py` + `PythonTtsSidecar`.** `prepare_conditionals()` una
+sola vez al arrancar (ya medido: 244 ms por frase y cruza 1,0x) y detector de
+descarrilamiento. Comando `asr-cli speak --text ... --lang en`. El sidecar propio
+se justifica solo: ~15% más rápido que ir por HTTP a voicebox.
 
 **Fase 3 — cableado del pipeline.** Agrupador, cola ordenada y enganche al evento
 de frase traducida en `session.rs`. Verificable con el CLI de punta a punta:
@@ -252,10 +341,14 @@ saldrá sin él.
 
 ## Sin verificar
 
-- La **calidad** de la voz clonada. Hay muestras generadas; es una decisión tuya,
-  no medible.
 - Chatterbox **con el ASR corriendo a la vez**. Todas mis medidas son del TTS
-  solo; la contienda por GPU podría empeorarlas.
-- La hipótesis de `prepare_conditionals`.
+  solo; la contienda por GPU podría empeorarlas. Es el riesgo abierto más
+  relevante, porque el margen sobre 1,0x es de un 3%.
 - **TADA 3B** (10 idiomas, con clonación) quedó sin medir: son 8 GB y Chatterbox
   ya cubre 23 idiomas.
+- El comportamiento del **agrupador** con frases reales de conversación, que son
+  más cortas e irregulares que el texto de prueba.
+
+Ya verificado y por tanto fuera de esta lista: la **calidad de la voz clonada**
+(aprobada escuchando muestras en español, inglés y alemán) y el efecto de
+**`prepare_conditionals`** (244 ms, tabla arriba).

@@ -75,3 +75,52 @@ output_dir = 'C:\Users\TuUsuario\Documents\LiveTranscriber'
 # Si ya existe uno con ese nombre se añade _2, _3... en vez de sobreescribirlo.
 # Los caracteres que Windows no admite (\ / : * ? " < > |) se cambian por _.
 output_name = "transcripcion"
+
+# ─── Voz sintetica ───────────────────────────────────────────────────────
+# Hablar la traduccion de lo que dices por el microfono, con tu voz clonada
+# o con una neutra. Es OPCIONAL y va en su propia seccion: apagada no cuesta
+# nada (ni proceso, ni VRAM). Exige `translate = true` y `capture_mic = true`,
+# porque lo que se pronuncia es la traduccion de tu micro. Las frases de los
+# demas se leen en pantalla, nunca se pronuncian.
+#
+# El circuito del microfono virtual: la voz se escribe en CABLE Input
+# (VB-CABLE, se instala aparte) y en la reunion eliges CABLE Output como
+# microfono. Como no pasa por los altavoces, no se realimenta a la captura.
+
+[speak]
+enabled = false
+
+# chatterbox -> tu voz clonada. 23 idiomas, ~3,4 GB de VRAM, y en una 3060 va
+#               justo en el filo de tiempo real (por eso se agrupan frases).
+# kokoro     -> voz neutra preajustada. 8 idiomas, ~0,6 GB, 40x tiempo real.
+engine = "chatterbox"
+
+# Interprete del venv DE VOZ. No es el del ASR y no puede serlo: el ASR exige
+# transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta probado con
+# 4.57.x. Dos entornos, cada sidecar con el suyo.
+python = 'E:\projects\voicebox\backend\venv\Scripts\python.exe'
+script = 'sidecar/tts_server.py'
+
+# Muestra de tu voz para clonar (solo chatterbox): WAV con 10-30 segundos de
+# habla limpia. La voz clonada imita el tono de la muestra.
+# voice_wav = 'C:\voces\mi-voz.wav'
+
+# Voz preajustada (solo kokoro). El prefijo dice idioma y genero:
+#   af_heart (ingles, f)   am_adam (ingles, m)
+#   ef_dora  (espanol, f)  em_alex (espanol, m)  em_santa (espanol, m)
+kokoro_voice = "af_heart"
+
+# Dispositivo por el que hablar. Sin esto suena por los altavoces, que casi
+# nunca es lo que se quiere: pon el id de CABLE Input (sale en `asr-cli devices`).
+# output_device_id = "{0.0.0.00000000}.{...}"
+
+# Cuanto juntar antes de sintetizar. Chatterbox tiene ~1 s de coste fijo por
+# peticion (medido): con frases sueltas genera por debajo de tiempo real y el
+# retraso crece sin limite; con bloques de ~250 caracteres pasa de 1x y queda
+# acotado. La espera maxima evita que una frase suelta se quede colgada.
+group_max_chars = 250
+group_max_wait_ms = 2000
+
+# Reconocer la propia voz sintetica si vuelve por la captura del sistema y
+# marcarla como eco en vez de re-traducirla (es -> en -> es sale raro).
+mark_echo = true

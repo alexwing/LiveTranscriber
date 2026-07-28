@@ -188,7 +188,7 @@ fn build_client(target: &CaptureTarget) -> Result<(wasapi::AudioClient, i64)> {
 }
 
 #[cfg(windows)]
-fn open_device(
+pub(crate) fn open_device(
     direction: &wasapi::Direction,
     device_id: Option<&str>,
 ) -> Result<(wasapi::AudioClient, i64)> {

@@ -27,6 +27,22 @@ export interface AppConfig {
   overlay_enabled: boolean;
   output_dir: string;
   output_name: string;
+  speak: SpeakConfig;
+}
+
+/** Voz sintetica: hablar la traduccion de lo que dices por el microfono.
+ *  Funcion opcional con su propia seccion; apagada no cuesta nada. */
+export interface SpeakConfig {
+  enabled: boolean;
+  engine: "chatterbox" | "kokoro";
+  python: string;
+  script: string;
+  voice_wav: string | null;
+  kokoro_voice: string;
+  output_device_id: string | null;
+  group_max_chars: number;
+  group_max_wait_ms: number;
+  mark_echo: boolean;
 }
 
 export interface AudioDevice {
@@ -44,21 +60,32 @@ export interface Entry {
 }
 
 /** Una frase traducida y su original. `paragraph` agrupa las del mismo
- *  parrafo: cada frase llega en cuanto esta lista, y la interfaz las junta. */
+ *  parrafo: cada frase llega en cuanto esta lista, y la interfaz las junta.
+ *  `echo` marca la propia voz sintetica volviendo por la captura del
+ *  sistema: no se re-traduce, se pinta atenuada y con etiqueta. */
 export interface TranslatedLine {
   source: Source;
   paragraph: number;
   at_ms: number;
   original: string;
   translated: string;
+  echo?: boolean;
 }
 
-/** Junta las frases de cada parrafo en un solo bloque para pintarlo. */
+/** Junta las frases de cada parrafo en un solo bloque para pintarlo.
+ *  Las frases eco no se funden con las normales aunque compartan parrafo:
+ *  alguien puede hablar mientras tu propia voz sintetica vuelve, y mezclar
+ *  ambas en un bloque haria ilegible quien dijo que. */
 export function groupByParagraph(lines: TranslatedLine[]): TranslatedLine[] {
   const out: TranslatedLine[] = [];
   for (const line of lines) {
     const last = out[out.length - 1];
-    if (last && last.paragraph === line.paragraph && last.source === line.source) {
+    if (
+      last &&
+      last.paragraph === line.paragraph &&
+      last.source === line.source &&
+      !!last.echo === !!line.echo
+    ) {
       last.original = `${last.original} ${line.original}`;
       last.translated = `${last.translated} ${line.translated}`;
     } else {
@@ -97,6 +124,16 @@ export type SessionEvent =
   | { kind: "level"; source: Source; rms: number; gain: number; gain_at_ceiling: boolean }
   | { kind: "error"; source: Source; message: string }
   | { kind: "stopped"; source: Source };
+
+/** Eventos que llegan por `speech-event` (voz sintetica). `queued_ms` es el
+ *  retraso de voz acumulado: si crece sin parar, se esta hablando mas rapido
+ *  de lo que el sintetizador genera. */
+export type SpeechEvent =
+  | { kind: "ready"; device: string; rate: number }
+  | { kind: "queue"; pending_texts: number; queued_ms: number }
+  | { kind: "spoke"; text: string; synth_ms: number; audio_ms: number }
+  | { kind: "error"; message: string }
+  | { kind: "stopped" };
 
 // Los errores de los comandos llegan como { message }.
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

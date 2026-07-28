@@ -1,6 +1,9 @@
-//! Captura de audio para reconocimiento de voz en Windows.
+//! Captura y salida de audio en Windows.
 //!
-//! Entrega siempre **16 kHz mono f32**, que es lo que espera el modelo. La
+//! La captura entrega siempre **16 kHz mono f32**, que es lo que espera el
+//! modelo; la salida ([`spawn_render`]) reproduce lo que el sintetizador de voz
+//! genere en el dispositivo que se le diga (el caso real: `CABLE Input`, para
+//! hacer de microfono virtual). La
 //! conversion desde el formato nativo del dispositivo (tipicamente 48 kHz
 //! estereo) la hace el propio motor de audio de Windows: al inicializar el
 //! cliente en modo compartido con `autoconvert`, WASAPI activa
@@ -21,11 +24,13 @@ mod capture;
 mod device;
 mod gate;
 mod normalize;
+mod render;
 
 pub use capture::{spawn_capture, CaptureTarget};
 pub use device::{list_devices, AudioDevice, DeviceKind};
 pub use gate::{rms, GateEvent, SilenceGate};
 pub use normalize::Normalizer;
+pub use render::spawn_render;
 
 /// Frecuencia de muestreo que exige el modelo.
 pub const TARGET_RATE: u32 = 16_000;

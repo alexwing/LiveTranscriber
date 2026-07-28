@@ -45,7 +45,8 @@
     "targets": "all",
     "resources": {
       "../sidecar/asr_server.py": "sidecar/asr_server.py",
-      "../sidecar/mt_server.py": "sidecar/mt_server.py"
+      "../sidecar/mt_server.py": "sidecar/mt_server.py",
+      "../sidecar/tts_server.py": "sidecar/tts_server.py"
     },
     "icon": [
       "icons/32x32.png",

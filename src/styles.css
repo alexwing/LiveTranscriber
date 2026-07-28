@@ -475,6 +475,19 @@ select:disabled {
   font-style: italic;
 }
 
+/* La propia voz sintetica captada de vuelta: se ve, pero en segundo plano.
+   No se re-traduce, asi que tampoco lleva flecha ni linea de traduccion. */
+.line.echo {
+  color: var(--muted);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.line.echo .who {
+  color: var(--muted);
+  border-style: dashed;
+}
+
 .muted {
   color: var(--muted);
   font-size: 13px;

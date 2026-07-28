@@ -1,0 +1,40 @@
+# Dependencias del sidecar de voz (tts_server.py). Van en un venv APARTE del
+# de los otros sidecars, y no es capricho: asr_server.py exige
+# transformers>=5.13 (es donde vive AutoModelForRNNT) y chatterbox-tts esta
+# probado con 4.57.x. Los dos conjuntos no caben en el mismo entorno.
+#
+# En esta maquina el venv de voz es el de voicebox
+# (E:\projects\voicebox\backend\venv), que ya tiene todo esto instalado y
+# probado. Para montar uno desde cero:
+#
+#   python -m venv .venv-tts
+#   .venv-tts\Scripts\pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   .venv-tts\Scripts\pip install -r sidecar\requirements-tts.txt
+#
+# chatterbox-tts va con --no-deps A PROPOSITO: pina torch==2.6 y
+# transformers==5.2.0 exactos que no hacen falta (probado con torch 2.11 y
+# transformers 4.57); sin --no-deps, pip destrozaria el venv reinstalando
+# torch sin CUDA. Sus dependencias reales van listadas debajo.
+#
+#   .venv-tts\Scripts\pip install --no-deps chatterbox-tts
+
+transformers>=4.46,<4.58
+numpy
+huggingface_hub
+
+# Dependencias reales de chatterbox-tts (instalado --no-deps, ver arriba).
+librosa
+conformer>=0.3.2
+diffusers>=0.29.0
+omegaconf
+resemble-perth>=1.0.1
+s3tokenizer
+pyloudnorm
+
+# Kokoro, el motor ligero. misaki es su G2P; el modelo espanol no necesita
+# extras, pero en y es vienen en el paquete base.
+kokoro>=0.9.4
+misaki[en]>=0.9.4
+# spacy model para el G2P ingles de misaki: pre-instalado o misaki intenta
+# descargarlo en tiempo de ejecucion.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

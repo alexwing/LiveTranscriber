@@ -7,13 +7,18 @@ pub mod config;
 pub mod engine;
 pub mod session;
 pub mod sidecar;
+pub mod speak;
 pub mod transcript;
 pub mod translate;
 
-pub use config::{sanitize_file_stem, AppConfig};
+pub use config::{sanitize_file_stem, AppConfig, SpeakConfig};
 pub use engine::{AsrEngine, AsrEvent, EngineError, EngineFactory};
 pub use session::{Session, SessionConfig, SessionEvent};
 pub use sidecar::{PythonSidecar, SidecarConfig};
+pub use speak::{
+    tts_lang_code, EchoRegistry, SpeechEvent, SpeechPump, SpeechPumpConfig, Synthesized,
+    Synthesizer, SynthesizerFactory, TtsConfig, TtsSidecar,
+};
 pub use transcript::{Entry, Transcript};
 pub use translate::{
     flores_code, MtConfig, MtSidecar, SentenceSplitter, TranslatedLine, TranslationPump,

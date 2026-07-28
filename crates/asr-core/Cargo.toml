@@ -15,3 +15,6 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# El sidecar de voz devuelve el audio como PCM i16 en base64 dentro de una
+# linea JSON, para no romper el protocolo de una-linea-por-mensaje.
+base64 = "0.22"

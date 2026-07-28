@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use asr_audio::{AudioDevice, CaptureTarget, DeviceKind, Source};
+use asr_core::speak::{EchoRegistry, SpeechEvent, SpeechPump, SpeechPumpConfig, TtsSidecar};
 use asr_core::translate::{MtSidecar, TranslatedLine, TranslationPump};
 use asr_core::{AppConfig, Session, SessionConfig, SessionEvent, Transcript};
 use tauri::menu::{Menu, MenuItem};
@@ -200,6 +201,11 @@ pub struct AppState {
     sessions: Mutex<Vec<Session>>,
     transcript: Arc<Mutex<Transcript>>,
     running: AtomicBool,
+    /// Asidero para callar la voz sintetica al parar. Sin el, "Parar"
+    /// dejaria a la voz terminando su cola varios segundos, y un
+    /// parar-y-arrancar rapido superpondria dos sintetizadores en VRAM y
+    /// dos flujos sobre el mismo cable.
+    speech_stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -214,6 +220,7 @@ impl AppState {
             sessions: Mutex::new(Vec::new()),
             transcript: Arc::new(Mutex::new(Transcript::new())),
             running: AtomicBool::new(false),
+            speech_stop: Mutex::new(None),
         }
     }
 }
@@ -438,11 +445,37 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
         return Err("no hay ninguna fuente activada".to_string().into());
     }
 
+    // La voz sintetica se monta la primera: es opcional, pero si esta
+    // activada y no puede arrancar (falta el WAV de la voz, el venv, el
+    // idioma no tiene sintetizador), mejor un error claro ahora que una
+    // reunion en la que crees que te oyen y no te oye nadie.
+    let mut speech = None;
+    if config.speak.enabled {
+        if !config.translate || !config.capture_mic {
+            state.running.store(false, Ordering::SeqCst);
+            return Err("Hablar con tu voz necesita 'Traducir en paralelo' y \
+                        'Transcribir el microfono' activados: lo que se habla \
+                        es la traduccion de lo que dices por el micro."
+                .to_string()
+                .into());
+        }
+        match start_speech(app, &config) {
+            Ok(started) => {
+                *state.speech_stop.lock().unwrap() = Some(started.stop.clone());
+                speech = Some(started);
+            }
+            Err(e) => {
+                state.running.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+    }
+
     // La traduccion se monta antes que las sesiones: si el traductor no
     // arranca, mejor enterarse sin haber abierto ya los dispositivos de audio.
     let mut translation_tx = None;
     if config.translate {
-        match start_translation(app, &config, state.transcript.clone()) {
+        match start_translation(app, &config, state.transcript.clone(), speech) {
             Ok(sender) => translation_tx = Some(sender),
             Err(e) => {
                 state.running.store(false, Ordering::SeqCst);
@@ -484,6 +517,15 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     Ok(())
 }
 
+/// Lo que el hilo de traduccion necesita saber de la voz sintetica: por donde
+/// mandarle los textos, el registro para reconocer el eco de la propia voz, y
+/// el asidero de parada que se guarda en el estado para que "Parar" calle.
+struct SpeechWiring {
+    texts: std::sync::mpsc::Sender<String>,
+    echo: Option<Arc<EchoRegistry>>,
+    stop: Arc<AtomicBool>,
+}
+
 /// Levanta el traductor y su hilo. Devuelve por donde mandarle los eventos.
 ///
 /// Va en un hilo aparte porque traducir bloquea ~160 ms por frase, y hacerlo
@@ -492,6 +534,7 @@ fn start_translation(
     app: &AppHandle,
     config: &AppConfig,
     transcript: Arc<Mutex<Transcript>>,
+    speech: Option<SpeechWiring>,
 ) -> Result<std::sync::mpsc::Sender<SessionEvent>, CmdError> {
     if config.language == "auto" {
         return Err("Para traducir hay que elegir un idioma concreto en vez de \
@@ -520,6 +563,9 @@ fn start_translation(
         &config.language,
         &config.target_language,
     )?;
+    if let Some(echo) = speech.as_ref().and_then(|s| s.echo.clone()) {
+        pump = pump.with_echo_registry(echo);
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<SessionEvent>();
     let app = app.clone();
@@ -528,11 +574,21 @@ fn start_translation(
         .spawn(move || {
             for event in rx {
                 for line in pump.handle(&event) {
+                    // A la voz va solo lo tuyo: las frases del microfono, ya
+                    // traducidas. Las de los demas se leen, no se pronuncian.
+                    // Y los ecos de la propia voz sintetica, tampoco.
+                    if let Some(speech) = &speech {
+                        if line.source == Source::Mic && !line.echo {
+                            let _ = speech.texts.send(line.translated.clone());
+                        }
+                    }
                     transcript.lock().unwrap().push_translation(line.clone());
                     let _ = app.emit("translation", line);
                 }
             }
             pump.shutdown();
+            // Al soltar `speech` se cierra el canal de textos, y la bomba de
+            // voz termina sola despues de decir lo que tenga pendiente.
             tracing::info!("hilo de traduccion terminado");
         })
         .map_err(|e| CmdError {
@@ -542,8 +598,163 @@ fn start_translation(
     Ok(tx)
 }
 
+/// Levanta el sintetizador, la salida de audio y la bomba que los une.
+/// Devuelve el cableado que el hilo de traduccion necesita.
+///
+/// El apagado no tiene boton: cuando el hilo de traduccion muere, el canal de
+/// textos se cierra, la bomba dice lo pendiente y para el sintetizador, y al
+/// soltar la cola de audio el hilo de render termina de reproducir y se va.
+/// Cada eslabon cae cuando cae el anterior, igual que el resto de la app.
+fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, CmdError> {
+    let lang = asr_core::tts_lang_code(&config.target_language).ok_or_else(|| {
+        format!(
+            "no hay sintetizador para {}: chatterbox habla 23 idiomas y ese \
+             no esta entre ellos",
+            config.target_language
+        )
+    })?;
+    // Kokoro cubre menos idiomas que chatterbox; sin esto el arranque pasa
+    // y cada frase de la reunion falla una a una.
+    if config.speak.engine == "kokoro" && !asr_core::speak::kokoro_supports(lang) {
+        return Err(format!(
+            "kokoro no tiene voces para {}: cambia al motor chatterbox o \
+             elige otro idioma destino",
+            config.target_language
+        )
+        .into());
+    }
+
+    let mut tts = config.tts();
+    tts.script = require_existing(app, &tts.script, "el sidecar de voz")?;
+    tts.python = require_existing(app, &tts.python, "el interprete del venv de voz")?;
+    if tts.engine == "chatterbox" {
+        let Some(wav) = tts.voice_wav.clone() else {
+            return Err("Para clonar tu voz hace falta un WAV de muestra: \
+                        graba 10-30 segundos de habla limpia y eligelo en la \
+                        configuracion, o cambia al motor kokoro (voz neutra)."
+                .to_string()
+                .into());
+        };
+        tts.voice_wav = Some(require_existing(app, &wav, "la muestra de voz")?);
+    }
+
+    let sidecar = TtsSidecar::spawn(&tts)?;
+    // Chatterbox tarda ~21 s en frio (medido); sin esperar aqui, la primera
+    // frase de la reunion se comeria el arranque como si fuera latencia.
+    let ready = sidecar.wait_ready(std::time::Duration::from_secs(180)).map_err(|e| {
+        CmdError {
+            message: format!(
+                "el sintetizador no arranco ({e}); el motivo esta en el log, \
+                 en las lineas 'sintetizador' (¿WAV de voz ilegible? ¿venv sin \
+                 chatterbox?)"
+            ),
+        }
+    })?;
+    tracing::info!(
+        "sintetizador listo en {} a {} Hz ({})",
+        ready.device,
+        ready.rate,
+        tts.engine
+    );
+
+    // La salida de audio: para hacer de microfono virtual, el id de CABLE
+    // Input. El contador de muestras pendientes es el que luego se ve en la
+    // interfaz como retraso de voz acumulado.
+    let render_alive = Arc::new(AtomicBool::new(true));
+    let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(32);
+    let (startup_tx, startup_rx) =
+        std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    asr_audio::spawn_render(
+        config.speak.output_device_id.clone(),
+        ready.rate,
+        render_alive.clone(),
+        render_rx,
+        queued.clone(),
+        startup_tx,
+    )?;
+    // Esperar a que el dispositivo abra de verdad. Sin esto, un id caducado
+    // (VB-CABLE reinstalado cambia los ids) devolveria Ok, la interfaz diria
+    // "voz lista", y el usuario hablaria toda la reunion sin que le oigan.
+    match startup_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return Err(format!(
+                "no se pudo abrir el dispositivo de salida de la voz: {e}. \
+                 ¿Sigue existiendo? (si has reinstalado VB-CABLE, su id \
+                 cambio: vuelve a elegirlo en la configuracion)"
+            )
+            .into())
+        }
+        Err(_) => {
+            return Err("la salida de audio de la voz no respondio al abrir"
+                .to_string()
+                .into())
+        }
+    }
+
+    let echo = config
+        .speak
+        .mark_echo
+        .then(|| Arc::new(EchoRegistry::new()));
+
+    // Los eventos de la voz suben a la interfaz por su propio hilo, como los
+    // de sesion: la bomba no debe esperar a que la ventana pinte.
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<SpeechEvent>();
+    let _ = event_tx.send(SpeechEvent::Ready {
+        device: ready.device.clone(),
+        rate: ready.rate,
+    });
+    let event_app = app.clone();
+    std::thread::Builder::new()
+        .name("asr-speech-ui".into())
+        .spawn(move || {
+            for event in event_rx {
+                let _ = event_app.emit("speech-event", &event);
+            }
+        })
+        .map_err(|e| CmdError {
+            message: format!("no se pudo lanzar el hilo de eventos de voz: {e}"),
+        })?;
+
+    let pump = SpeechPump::new(
+        Box::new(sidecar),
+        SpeechPumpConfig {
+            lang: lang.to_string(),
+            group_max_chars: config.speak.group_max_chars,
+            group_max_wait_ms: config.speak.group_max_wait_ms,
+        },
+        render_tx,
+        queued,
+        ready.rate,
+        echo.clone(),
+        event_tx,
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (text_tx, text_rx) = std::sync::mpsc::channel::<String>();
+    let pump_stop = stop.clone();
+    std::thread::Builder::new()
+        .name("asr-speech".into())
+        .spawn(move || pump.run(text_rx, pump_stop, render_alive))
+        .map_err(|e| CmdError {
+            message: format!("no se pudo lanzar el hilo de voz: {e}"),
+        })?;
+
+    Ok(SpeechWiring {
+        texts: text_tx,
+        echo,
+        stop,
+    })
+}
+
 fn stop_internal(app: &AppHandle, state: &AppState) {
     state.running.store(false, Ordering::SeqCst);
+    // La voz primero y sin esperar: que se calle mientras las sesiones se
+    // recogen, no despues.
+    if let Some(stop) = state.speech_stop.lock().unwrap().take() {
+        stop.store(true, Ordering::Relaxed);
+    }
     let sessions = std::mem::take(&mut *state.sessions.lock().unwrap());
     for session in sessions {
         session.join();

@@ -73,6 +73,68 @@ pub struct AppConfig {
     /// Nombre base del fichero. El nombre final lleva la fecha delante:
     /// `AAAA_MM_DD_<nombre>.<ext>`. Ver [`AppConfig::output_filename`].
     pub output_name: String,
+
+    /// Voz sintetica: hablar la traduccion de lo que dices por el microfono.
+    /// Es una funcion opcional con su propia seccion `[speak]` en el TOML;
+    /// apagada no cuesta nada (ni proceso, ni VRAM).
+    pub speak: SpeakConfig,
+}
+
+/// Configuracion de la voz sintetica. Va aparte del resto porque es una
+/// funcion opcional entera: se activa sola, con sus propias dependencias
+/// (otro venv, otro modelo) y su propio dispositivo de salida.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SpeakConfig {
+    /// Interruptor general. Exige ademas `translate = true` y
+    /// `capture_mic = true`: lo que se habla es la traduccion de tu micro.
+    pub enabled: bool,
+    /// `chatterbox` (tu voz clonada, 23 idiomas, ~3,4 GB de VRAM, en el
+    /// filo de tiempo real) o `kokoro` (voz neutra, 8 idiomas, ~0,6 GB,
+    /// 40x tiempo real).
+    pub engine: String,
+    /// Interprete del venv de voz. **No** es el del ASR: el ASR exige
+    /// transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta probado
+    /// con 4.57.x, asi que no caben en el mismo entorno.
+    pub python: PathBuf,
+    /// Ruta a `tts_server.py`.
+    pub script: PathBuf,
+    /// Muestra de tu voz para clonar: 10-30 s de habla limpia en WAV.
+    /// Solo la usa chatterbox.
+    pub voice_wav: Option<PathBuf>,
+    /// Voz preajustada de kokoro (`af_heart`, `ef_dora`, `em_alex`, ...).
+    pub kokoro_voice: String,
+    /// Dispositivo de salida. Para hacer de microfono virtual aqui va el id
+    /// de `CABLE Input` (VB-CABLE); `None` = el predeterminado, que suena
+    /// por los altavoces y en general no es lo que se quiere.
+    pub output_device_id: Option<String>,
+    /// Caracteres a juntar antes de sintetizar. Chatterbox tiene ~1 s de
+    /// coste fijo por llamada (medido): con frases sueltas queda por debajo
+    /// de tiempo real y el retraso crece sin limite; con bloques de ~250
+    /// caracteres pasa de 1x y queda acotado.
+    pub group_max_chars: usize,
+    /// La frase mas vieja no espera mas que esto, aunque el bloque sea corto.
+    pub group_max_wait_ms: u64,
+    /// Reconocer la propia voz sintetica si vuelve por la captura del
+    /// sistema, y marcarla en vez de re-traducirla (es->en->es sale raro).
+    pub mark_echo: bool,
+}
+
+impl Default for SpeakConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: "chatterbox".to_string(),
+            python: PathBuf::from(r"E:\projects\voicebox\backend\venv\Scripts\python.exe"),
+            script: PathBuf::from("sidecar/tts_server.py"),
+            voice_wav: None,
+            kokoro_voice: "af_heart".to_string(),
+            output_device_id: None,
+            group_max_chars: 250,
+            group_max_wait_ms: 2000,
+            mark_echo: true,
+        }
+    }
 }
 
 /// Nombre a usar cuando el configurado no deja nada utilizable.
@@ -170,6 +232,7 @@ impl Default for AppConfig {
             overlay_enabled: false,
             output_dir: default_output_dir(),
             output_name: "transcripcion".to_string(),
+            speak: SpeakConfig::default(),
         }
     }
 }
@@ -275,6 +338,21 @@ impl AppConfig {
             language: self.language.clone(),
             lookahead: self.lookahead,
             dtype: self.dtype.clone(),
+            hf_home: self.hf_home.clone(),
+        }
+    }
+
+    pub fn tts(&self) -> crate::speak::TtsConfig {
+        crate::speak::TtsConfig {
+            python: self.speak.python.clone(),
+            script: self.speak.script.clone(),
+            engine: self.speak.engine.clone(),
+            voice_wav: self.speak.voice_wav.clone(),
+            kokoro_voice: self.speak.kokoro_voice.clone(),
+            // Se habla en el idioma destino de la traduccion; precalentarlo
+            // mueve la carga perezosa de kokoro al arranque.
+            warm_lang: crate::speak::tts_lang_code(&self.target_language)
+                .map(str::to_string),
             hf_home: self.hf_home.clone(),
         }
     }
@@ -409,6 +487,42 @@ mod tests {
             cfg.output_dir_absolute(),
             PathBuf::from("D:\\mis transcripciones")
         );
+    }
+
+    #[test]
+    fn un_toml_sin_seccion_speak_carga_con_la_voz_apagada() {
+        // Las configuraciones anteriores a la voz sintetica no tienen
+        // `[speak]`; deben seguir cargando y con la funcion desactivada.
+        let cfg: AppConfig = toml::from_str(r#"language = "es-ES""#).expect("parsea");
+        assert!(!cfg.speak.enabled);
+        assert_eq!(cfg.speak.engine, "chatterbox");
+    }
+
+    #[test]
+    fn la_seccion_speak_da_la_vuelta_completa_en_toml() {
+        let mut cfg = AppConfig::default();
+        cfg.speak.enabled = true;
+        cfg.speak.engine = "kokoro".to_string();
+        cfg.speak.voice_wav = Some(PathBuf::from(r"C:\voces\mia.wav"));
+        cfg.speak.output_device_id = Some("{0.0.0.00000000}.{abc}".to_string());
+
+        let text = toml::to_string_pretty(&cfg).expect("serializa");
+        assert!(text.contains("[speak]"), "deberia tener su propia seccion");
+
+        let back: AppConfig = toml::from_str(&text).expect("deserializa");
+        assert!(back.speak.enabled);
+        assert_eq!(back.speak.engine, "kokoro");
+        assert_eq!(back.speak.voice_wav, cfg.speak.voice_wav);
+        assert_eq!(back.speak.output_device_id, cfg.speak.output_device_id);
+    }
+
+    #[test]
+    fn una_seccion_speak_parcial_completa_con_los_valores_por_defecto() {
+        let cfg: AppConfig =
+            toml::from_str("[speak]\nenabled = true\n").expect("parsea");
+        assert!(cfg.speak.enabled);
+        assert_eq!(cfg.speak.group_max_chars, 250, "el resto sale del Default");
+        assert!(cfg.speak.mark_echo);
     }
 
     #[test]

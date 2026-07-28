@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use asr_audio::{list_devices, spawn_capture, CaptureTarget, DeviceKind, Source};
+use asr_core::speak::{Synthesizer, TtsSidecar};
 use asr_core::translate::{MtConfig, MtSidecar, TranslationPump};
 use asr_core::{AppConfig, Session, SessionConfig, SessionEvent, Transcript};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -100,6 +101,37 @@ enum Command {
         #[arg(long, default_value = "sidecar/mt_server.py")]
         mt_script: PathBuf,
     },
+
+    /// Sintetiza un texto y lo reproduce en un dispositivo de salida. Es la
+    /// prueba del microfono virtual sin reunion: manda la voz a CABLE Input
+    /// y, si algo grabando de CABLE Output la oye, el circuito funciona.
+    Speak {
+        /// Texto a decir.
+        #[arg(long)]
+        text: String,
+        /// Idioma del texto (codigo corto: en, es, de...).
+        #[arg(long, default_value = "en")]
+        lang: String,
+        /// Dispositivo de salida (id de `asr-cli devices`). Sin el, el
+        /// predeterminado: suena por los altavoces.
+        #[arg(long)]
+        device_id: Option<String>,
+        /// chatterbox (clonacion) o kokoro (voz neutra, mas ligero).
+        #[arg(long, default_value = "chatterbox")]
+        engine: String,
+        /// WAV con la voz a clonar (obligatorio con chatterbox).
+        #[arg(long)]
+        voice_wav: Option<PathBuf>,
+        /// Voz preajustada de kokoro.
+        #[arg(long, default_value = "af_heart")]
+        kokoro_voice: String,
+        /// Interprete del venv de voz (no es el del ASR).
+        #[arg(long)]
+        python: Option<PathBuf>,
+        /// Ruta a tts_server.py.
+        #[arg(long, default_value = "sidecar/tts_server.py")]
+        script: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -144,6 +176,25 @@ fn main() -> Result<()> {
             save_srt,
             translate_to,
             mt_script,
+        }),
+        Command::Speak {
+            text,
+            lang,
+            device_id,
+            engine,
+            voice_wav,
+            kokoro_voice,
+            python,
+            script,
+        } => speak(SpeakArgs {
+            text,
+            lang,
+            device_id,
+            engine,
+            voice_wav,
+            kokoro_voice,
+            python,
+            script,
         }),
     }
 }
@@ -399,5 +450,92 @@ fn run(args: RunArgs) -> Result<()> {
         transcript.save_srt(&path)?;
         println!("guardado {}", path.display());
     }
+    Ok(())
+}
+
+struct SpeakArgs {
+    text: String,
+    lang: String,
+    device_id: Option<String>,
+    engine: String,
+    voice_wav: Option<PathBuf>,
+    kokoro_voice: String,
+    python: Option<PathBuf>,
+    script: PathBuf,
+}
+
+fn speak(args: SpeakArgs) -> Result<()> {
+    let defaults = AppConfig::default();
+    let mut tts = defaults.tts();
+    tts.engine = args.engine;
+    tts.script = args.script;
+    tts.kokoro_voice = args.kokoro_voice;
+    tts.voice_wav = args.voice_wav;
+    tts.warm_lang = Some(args.lang.clone());
+    if let Some(python) = args.python {
+        tts.python = python;
+    }
+
+    anyhow::ensure!(
+        tts.script.exists(),
+        "no encuentro el sidecar de voz en {}",
+        tts.script.display()
+    );
+    anyhow::ensure!(
+        tts.python.exists(),
+        "no encuentro el interprete del venv de voz en {} (pasalo con --python)",
+        tts.python.display()
+    );
+    if tts.engine == "chatterbox" {
+        anyhow::ensure!(
+            tts.voice_wav.is_some(),
+            "chatterbox clona una voz: pasa --voice-wav con 10-30 s de habla \
+             limpia, o usa --engine kokoro para una voz neutra"
+        );
+    }
+
+    println!("arrancando el sintetizador (chatterbox tarda ~21 s en frio)...");
+    let mut sidecar = TtsSidecar::spawn(&tts)?;
+    let ready = sidecar.wait_ready(Duration::from_secs(300))?;
+    println!("sintetizador listo en {} a {} Hz", ready.device, ready.rate);
+
+    let synthesized = sidecar.synthesize(&args.text, &args.lang)?;
+    let audio_secs = synthesized.samples.len() as f32 / synthesized.rate as f32;
+    println!(
+        "sintetizado: {audio_secs:.2}s de audio en {} ms (RTFx {:.2}x)",
+        synthesized.synth_ms,
+        audio_secs / (synthesized.synth_ms as f32 / 1000.0).max(0.001),
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (tx, rx) = sync_channel::<Vec<f32>>(4);
+    let (startup_tx, startup_rx) = sync_channel::<std::result::Result<(), String>>(1);
+    queued.fetch_add(synthesized.samples.len() as u64, Ordering::Relaxed);
+    let handle = asr_audio::spawn_render(
+        args.device_id,
+        synthesized.rate,
+        running.clone(),
+        rx,
+        queued,
+        startup_tx,
+    )
+    .context("arrancando la salida de audio")?;
+
+    // Sin esperar el arranque, un dispositivo inexistente imprimiria "hecho"
+    // sin haber sonado nada.
+    match startup_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => anyhow::bail!("no se pudo abrir el dispositivo de salida: {e}"),
+        Err(_) => anyhow::bail!("la salida de audio no respondio al abrir"),
+    }
+
+    tx.send(synthesized.samples)?;
+    drop(tx); // el hilo de render termina solo cuando acabe de reproducir
+    println!("reproduciendo...");
+    let _ = handle.join();
+    println!("hecho");
+
+    sidecar.shutdown()?;
     Ok(())
 }

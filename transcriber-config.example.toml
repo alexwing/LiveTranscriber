@@ -1,0 +1,77 @@
+# Copia esto a transcriber-config.toml. La app tambien lo escribe sola cuando
+# cambias algo en la interfaz, asi que no hace falta editarlo a mano.
+
+# Interprete con torch y transformers. Es el venv del proyecto del modelo.
+python = 'E:\projects\nemotron-3.5-asr-streaming-0.6b\.venv\Scripts\python.exe'
+script = 'sidecar/asr_server.py'
+mt_script = 'sidecar/mt_server.py'
+
+# Traduccion en paralelo, con NLLB-200 en un segundo proceso.
+# El idioma de origen es `language`, que por eso NO puede ser "auto" si esto
+# esta activado: NLLB necesita saber desde donde traduce.
+translate = false
+target_language = "en-US"
+
+# Locale (es-ES, en-US, fr-FR...) o "auto" para que lo detecte el modelo.
+language = "auto"
+
+# Solo 0, 3, 6 o 13. Son los unicos que acepta el modelo.
+#   0  -> 80 ms   minima latencia, mas errores, ~1 flujo en una 3060
+#   3  -> 320 ms  equilibrio recomendado, ~4 flujos
+#   6  -> 560 ms  mas preciso
+#   13 -> 1120 ms maxima precision
+lookahead = 3
+
+# bfloat16 va mejor y mas rapido que float16 en este modelo.
+dtype = "bfloat16"
+
+capture_system = true
+capture_mic = false
+
+# null = dispositivo predeterminado. Los ids salen de `asr-cli devices`.
+# system_device_id = "{0.0.0.00000000}.{...}"
+# mic_device_id = "{0.0.1.00000000}.{...}"
+
+# Cuantos dB por debajo del habla reciente cuenta como pausa. Es RELATIVO a
+# proposito: el nivel absoluto depende del volumen de Windows, la diferencia
+# entre hablar y callarse no. Menos = corta mas; mas = corta menos.
+gate_drop_db = 25.0
+# Suelo absoluto, solo para que el silencio digital cuente siempre como silencio.
+# -80 deja pasar incluso el audio muy atenuado que da el loopback.
+gate_floor_dbfs = -80.0
+# Segundos de silencio antes de dejar de alimentar al modelo. Solo afecta al
+# gasto de GPU; no decide donde acaban los parrafos.
+gate_hold_secs = 2.0
+
+# Los parrafos se cierran cuando el modelo lleva este rato SIN TRANSCRIBIR nada
+# nuevo. Se mira el texto y no el volumen a proposito: con musica de fondo el
+# nivel no baja nunca, pero la musica tampoco genera transcripcion.
+# Mas bajo = parrafos mas cortos y traduccion mas rapida, pero corta a mitad de
+# frase con mas facilidad.
+paragraph_idle_secs = 1.2
+# Tope, para que un monologo sin pausas no quede como un bloque interminable.
+paragraph_max_secs = 30.0
+
+# Compensa el volumen de Windows. Dejalo activado: el loopback captura despues
+# del control de volumen, y sin esto un volumen bajo deja la transcripcion en nada.
+normalize_gain = true
+
+hotkey_toggle = "CmdOrControl+Shift+T"
+hotkey_overlay = "CmdOrControl+Shift+O"
+overlay_enabled = false
+
+# Carpeta donde se guardan los .txt y .srt exportados. Tiene que ser ABSOLUTA:
+# una relativa se resolveria contra el directorio de trabajo del proceso, que con
+# `tauri dev` es src-tauri/, y no sabrias donde han acabado los ficheros. Si aqui
+# hay una relativa se ignora y se usa Documentos\LiveTranscriber.
+# Lo normal es no tocarlo a mano: se elige desde la interfaz con "Cambiar…".
+output_dir = 'C:\Users\TuUsuario\Documents\LiveTranscriber'
+
+# Nombre base del fichero. El nombre final lleva la fecha delante:
+#   2026_07_28_transcripcion.txt
+#   2026_07_28_transcripcion.srt
+#   2026_07_28_transcripcion_traducida.srt   (solo la traduccion)
+#   2026_07_28_transcripcion_bilingue.txt    (original y traduccion)
+# Si ya existe uno con ese nombre se añade _2, _3... en vez de sobreescribirlo.
+# Los caracteres que Windows no admite (\ / : * ? " < > |) se cambian por _.
+output_name = "transcripcion"

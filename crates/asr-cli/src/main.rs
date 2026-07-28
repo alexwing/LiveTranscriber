@@ -1,0 +1,403 @@
+//! Banco de pruebas de LiveTranscriber sin interfaz.
+//!
+//!   asr-cli devices                      lista dispositivos
+//!   asr-cli level --seconds 10           mide nivel de entrada (sin modelo)
+//!   asr-cli run --seconds 30             transcribe de verdad
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use asr_audio::{list_devices, spawn_capture, CaptureTarget, DeviceKind, Source};
+use asr_core::translate::{MtConfig, MtSidecar, TranslationPump};
+use asr_core::{AppConfig, Session, SessionConfig, SessionEvent, Transcript};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Parser)]
+#[command(name = "asr-cli", about = "Captura y transcripcion sin interfaz")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Which {
+    /// Todo lo que suena en el sistema (loopback).
+    System,
+    /// El microfono.
+    Mic,
+}
+
+impl Which {
+    fn target(self, device_id: Option<String>) -> CaptureTarget {
+        match self {
+            Which::System => CaptureTarget::Loopback { device_id },
+            Which::Mic => CaptureTarget::Microphone { device_id },
+        }
+    }
+
+    fn source(self) -> Source {
+        match self {
+            Which::System => Source::System,
+            Which::Mic => Source::Mic,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Lista dispositivos de entrada y salida.
+    Devices,
+
+    /// Captura y muestra el nivel, sin cargar el modelo. Sirve para confirmar
+    /// que el loopback entrega audio antes de meter la GPU de por medio.
+    Level {
+        #[arg(long, value_enum, default_value = "system")]
+        from: Which,
+        #[arg(long)]
+        device_id: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Captura solo el audio de este proceso (loopback por PID).
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+
+    /// Transcribe de verdad, arrancando el sidecar de Python.
+    Run {
+        #[arg(long, value_enum, default_value = "system")]
+        from: Which,
+        #[arg(long)]
+        device_id: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        #[arg(long)]
+        pid: Option<u32>,
+        #[arg(long, default_value = "auto")]
+        language: String,
+        #[arg(long, default_value_t = 3)]
+        lookahead: u8,
+        /// Interprete del venv con torch y transformers.
+        #[arg(long)]
+        python: Option<PathBuf>,
+        /// Ruta a asr_server.py.
+        #[arg(long, default_value = "sidecar/asr_server.py")]
+        script: PathBuf,
+        /// Guarda la transcripcion en este .txt al terminar.
+        #[arg(long)]
+        save_txt: Option<PathBuf>,
+        /// Guarda la transcripcion en este .srt al terminar.
+        #[arg(long)]
+        save_srt: Option<PathBuf>,
+        /// Traducir tambien a este locale (en-US, de-DE...). Exige que
+        /// --language sea concreto: el traductor necesita saber el origen.
+        #[arg(long)]
+        translate_to: Option<String>,
+        /// Ruta a mt_server.py.
+        #[arg(long, default_value = "sidecar/mt_server.py")]
+        mt_script: PathBuf,
+    },
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    match Cli::parse().command {
+        Command::Devices => devices(),
+        Command::Level {
+            from,
+            device_id,
+            seconds,
+            pid,
+        } => level(from, device_id, seconds, pid),
+        Command::Run {
+            from,
+            device_id,
+            seconds,
+            pid,
+            language,
+            lookahead,
+            python,
+            script,
+            save_txt,
+            save_srt,
+            translate_to,
+            mt_script,
+        } => run(RunArgs {
+            from,
+            device_id,
+            seconds,
+            pid,
+            language,
+            lookahead,
+            python,
+            script,
+            save_txt,
+            save_srt,
+            translate_to,
+            mt_script,
+        }),
+    }
+}
+
+fn devices() -> Result<()> {
+    for (kind, title) in [
+        (DeviceKind::Output, "SALIDAS (capturables por loopback)"),
+        (DeviceKind::Input, "ENTRADAS (microfonos)"),
+    ] {
+        println!("\n{title}");
+        println!("{}", "-".repeat(title.len()));
+        for device in list_devices(kind).context("enumerando dispositivos")? {
+            let mark = if device.is_default { "*" } else { " " };
+            println!("{mark} {}\n    id: {}", device.name, device.id);
+        }
+    }
+    println!("\n(* = predeterminado)");
+    Ok(())
+}
+
+fn target_for(which: Which, device_id: Option<String>, pid: Option<u32>) -> CaptureTarget {
+    match pid {
+        Some(pid) => CaptureTarget::Process {
+            pid,
+            include_children: true,
+        },
+        None => which.target(device_id),
+    }
+}
+
+fn level(which: Which, device_id: Option<String>, seconds: u64, pid: Option<u32>) -> Result<()> {
+    let target = target_for(which, device_id, pid);
+    println!("capturando de {target:?} durante {seconds}s...");
+    println!("(si el nivel se queda en 0, no esta entrando audio)\n");
+
+    let running = Arc::new(AtomicBool::new(true));
+    let (tx, rx) = sync_channel::<Vec<f32>>(64);
+    let handle = spawn_capture(target, running.clone(), tx).context("arrancando la captura")?;
+
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut blocks = 0usize;
+    let mut samples = 0usize;
+    let mut peak = 0.0f32;
+    // El mismo normalizador que usa la sesion, para ver cuanta ganancia haria
+    // falta y si se queda corta.
+    let mut normalizer = asr_audio::Normalizer::new(true);
+
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(mut block) => {
+                let rms = asr_audio::rms(&block);
+                normalizer.process(&mut block);
+                peak = peak.max(rms);
+                blocks += 1;
+                samples += block.len();
+                if blocks % 5 == 0 {
+                    println!(
+                        "{}  rms {:.5}  ganancia x{:.1}{}",
+                        meter(asr_audio::rms(&block)),
+                        rms,
+                        normalizer.gain(),
+                        if normalizer.at_ceiling() { "  <-- al tope" } else { "" }
+                    );
+                }
+            }
+            Err(_) => {
+                if !running.load(Ordering::Relaxed) {
+                    println!("la captura se detuvo sola (mira los errores de arriba)");
+                    break;
+                }
+                println!("... sin datos");
+            }
+        }
+    }
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+
+    let secs = samples as f64 / asr_audio::TARGET_RATE as f64;
+    println!("\n{blocks} bloques, {samples} muestras = {secs:.2}s de audio a 16 kHz mono");
+    println!("pico rms crudo {peak:.5}  (ganancia final x{:.1})", normalizer.gain());
+
+    if blocks == 0 {
+        println!("\nNo llego ni un bloque. Con loopback eso significa que el dispositivo");
+        println!("estaba completamente ocioso: Windows no genera eventos si nadie");
+        println!("reproduce nada. Pon musica o un video y repite.");
+    } else if peak == 0.0 {
+        println!("\nLlego audio pero todo a cero: el dispositivo esta silenciado.");
+    } else if normalizer.at_ceiling() {
+        println!("\nAviso: la normalizacion se quedo al tope. El volumen del sistema");
+        println!("esta muy bajo y el loopback captura despues del volumen, asi que la");
+        println!("transcripcion saldra pobre. Sube el volumen de Windows.");
+    }
+    Ok(())
+}
+
+fn meter(rms: f32) -> String {
+    // Escala logaritmica: rms 1.0 -> lleno, 0.001 (-60 dBFS) -> vacio.
+    let db = 20.0 * rms.max(1e-6).log10();
+    let filled = (((db + 60.0) / 60.0).clamp(0.0, 1.0) * 30.0) as usize;
+    format!("[{}{}]", "#".repeat(filled), " ".repeat(30 - filled))
+}
+
+struct RunArgs {
+    from: Which,
+    device_id: Option<String>,
+    seconds: u64,
+    pid: Option<u32>,
+    language: String,
+    lookahead: u8,
+    python: Option<PathBuf>,
+    script: PathBuf,
+    save_txt: Option<PathBuf>,
+    save_srt: Option<PathBuf>,
+    translate_to: Option<String>,
+    mt_script: PathBuf,
+}
+
+fn run(args: RunArgs) -> Result<()> {
+    let defaults = AppConfig::default();
+    let mut sidecar = defaults.sidecar();
+    sidecar.python = args.python.unwrap_or(defaults.python);
+    sidecar.script = args.script;
+    sidecar.language = args.language;
+    sidecar.lookahead = args.lookahead;
+
+    anyhow::ensure!(
+        sidecar.script.exists(),
+        "no encuentro el script del sidecar en {}",
+        sidecar.script.display()
+    );
+
+    let source = args.from.source();
+    let cfg = SessionConfig {
+        target: target_for(args.from, args.device_id, args.pid),
+        source,
+        gate_drop_db: defaults.gate_drop_db,
+        gate_floor_dbfs: defaults.gate_floor_dbfs,
+        gate_hold_secs: defaults.gate_hold_secs,
+        paragraph_idle_secs: defaults.paragraph_idle_secs,
+        paragraph_max_secs: defaults.paragraph_max_secs,
+        normalize_gain: defaults.normalize_gain,
+    };
+
+    // El traductor primero: si no arranca, mejor saberlo antes de abrir el audio.
+    let mut pump = match args.translate_to.as_deref() {
+        None => None,
+        Some(target) => {
+            anyhow::ensure!(
+                sidecar.language != "auto",
+                "para traducir hay que pasar --language con un idioma concreto: \
+                 el traductor necesita saber desde cual parte"
+            );
+            let mt = MtConfig {
+                python: sidecar.python.clone(),
+                script: args.mt_script,
+                dtype: sidecar.dtype.clone(),
+                hf_home: sidecar.hf_home.clone(),
+            };
+            anyhow::ensure!(
+                mt.script.exists(),
+                "no encuentro el sidecar de traduccion en {}",
+                mt.script.display()
+            );
+            println!("arrancando el traductor (la primera vez descarga NLLB)...");
+            let mt_sidecar = MtSidecar::spawn(&mt)?;
+            let device = mt_sidecar.wait_ready(Duration::from_secs(300))?;
+            println!("traductor listo en {device}, destino {target}");
+            Some(TranslationPump::new(
+                Box::new(mt_sidecar),
+                &sidecar.language,
+                target,
+            )?)
+        }
+    };
+
+    println!("arrancando el modelo (tarda unos segundos)...");
+    let (tx, rx) = std::sync::mpsc::channel::<SessionEvent>();
+    let session = Session::start(cfg, &sidecar, tx).context("arrancando la sesion")?;
+
+    let mut transcript = Transcript::new();
+    let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    let mut last_level_print = Instant::now();
+
+    while Instant::now() < deadline {
+        let Ok(event) = rx.recv_timeout(Duration::from_millis(500)) else {
+            continue;
+        };
+
+        // Traducir bloquea unos 160 ms por frase; en el CLI da igual hacerlo
+        // aqui mismo, en la app va en su propio hilo.
+        if let Some(pump) = pump.as_mut() {
+            for line in pump.handle(&event) {
+                println!("\n  → {}", line.translated);
+                transcript.push_translation(line);
+            }
+        }
+
+        match event {
+            SessionEvent::Ready {
+                device,
+                latency_ms,
+                language,
+                ..
+            } => {
+                println!("motor listo en {device}, latencia {latency_ms} ms, idioma {language}");
+                println!("--- transcripcion ---");
+            }
+            SessionEvent::Delta { at_ms, text, .. } => {
+                print!("{text}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                transcript.push_delta(source, at_ms, &text);
+            }
+            SessionEvent::SegmentEnd { at_ms, .. } => {
+                if transcript.close_segment(source, at_ms).is_some() {
+                    println!();
+                }
+            }
+            SessionEvent::Level { rms, .. } => {
+                // Solo de vez en cuando, para no tapar el texto.
+                if last_level_print.elapsed() > Duration::from_secs(5) {
+                    last_level_print = Instant::now();
+                    tracing::debug!("nivel {rms:.5}");
+                }
+            }
+            SessionEvent::Error { message, .. } => eprintln!("\n[error] {message}"),
+            SessionEvent::Stopped { .. } => {
+                println!("\nla sesion se detuvo");
+                break;
+            }
+        }
+    }
+
+    println!("\n--- fin ---");
+    session.join();
+    transcript.close_all(args.seconds * 1000);
+    if let Some(mut pump) = pump {
+        pump.shutdown();
+    }
+
+    if transcript.is_empty() {
+        println!("no se transcribio nada");
+    } else {
+        println!("\n{}", transcript.to_text());
+    }
+
+    if let Some(path) = args.save_txt {
+        transcript.save_text(&path)?;
+        println!("guardado {}", path.display());
+    }
+    if let Some(path) = args.save_srt {
+        transcript.save_srt(&path)?;
+        println!("guardado {}", path.display());
+    }
+    Ok(())
+}

@@ -1,0 +1,22 @@
+# Dependencias de los sidecars de Python.
+#
+# torch va aparte porque necesita el indice de CUDA. La rueda cu128 trae sm_75
+# en adelante, asi que cubre desde Turing (RTX 20xx) pero no una GTX 10xx:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+# torchaudio no se usa.
+
+transformers>=5.13
+numpy
+huggingface_hub
+
+# Si, librosa, aunque el audio lo capture Rust y aqui no se abra ningun fichero
+# de sonido. No es por nosotros: `NemotronAsrStreamingFeatureExtractor` la
+# declara como backend obligatorio, y sin ella `AutoProcessor.from_pretrained`
+# falla con un ImportError antes de llegar a mirar el audio.
+#
+# Se descubrio instalando en un entorno limpio: en el de desarrollo estaba ya
+# puesta por otras pruebas, asi que la lista deducida leyendo los imports estaba
+# incompleta. Arrastra numba, scipy y soundfile.
+librosa

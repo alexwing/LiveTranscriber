@@ -1,370 +1,351 @@
 # LiveTranscriber
 
-Transcribe en vivo **lo que suena en tu PC** — Teams, una película, el navegador —
-y opcionalmente tu micrófono a la vez, en local y sin API de pago.
+Live transcription of **whatever is playing on your PC** — a Teams call, a film, the
+browser — and optionally your microphone at the same time. Runs locally, no API bill.
 
-Usa [`nvidia/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
-a través del proyecto hermano en `E:\projects\nemotron-3.5-asr-streaming-0.6b`.
+Optional parallel translation into 40+ languages.
 
-Todo lo que se afirma abajo está medido en esta máquina (RTX 3060 12 GB, Windows 11),
-no copiado de documentación.
+Built on [`nvidia/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
+(FastConformer + RNNT, cache-aware streaming) with
+[NLLB-200](https://huggingface.co/facebook/nllb-200-distilled-600M) for translation.
 
-## Cómo está montado
+**Windows only** — see [Portability](#portability). Every number below was measured on
+one machine (RTX 3060 12 GB, Windows 11), not copied from documentation.
 
-Misma forma que TapoController: workspace de Cargo con la lógica en crates
-independientes de Tauri, y `src-tauri` como capa fina que solo traduce a la interfaz.
+> Source comments and commit messages are in Spanish. The UI is in Spanish too.
+> Configuration keys and identifiers are English.
 
-```
-crates/asr-audio    captura WASAPI, normalización y gate      (≈ tapo-proto)
-crates/asr-core     motor, sesión, historial, configuración
-crates/asr-cli      banco de pruebas sin interfaz             (≈ tapo-cli)
-src-tauri           comandos, bandeja, atajos, eventos
-sidecar/            el proceso Python que corre el modelo
-src/                React 18 + Vite + TS, wrapper tipado sobre invoke
-```
+## Getting started
 
-El flujo: WASAPI → normalizador → gate de silencio → frames por stdin al sidecar →
-el modelo devuelve texto por stdout → `emit` a la ventana → React lo pinta.
-
-A diferencia de TapoController, aquí sí se usan eventos (`emit`/`listen`): el texto
-en streaming necesita push, no vale con `invoke`.
-
-### El motor está desacoplado a propósito
-
-`asr-core::AsrEngine` es un trait. Hoy solo lo implementa `PythonSidecar`, que arrastra
-un venv de PyTorch de ~5 GB. Cambiarlo por un motor ONNX en Rust puro es implementar
-el trait otra vez y cambiar la línea donde se construye: ni la captura ni la interfaz
-se enteran.
-
-## Puesta en marcha
-
-En una máquina nueva, un solo comando. Ver [INSTALL.md](INSTALL.md) para el detalle.
+You need an NVIDIA driver and ~15 GB of free disk space. Everything else is
+provisioned for you. See [INSTALL.md](INSTALL.md) for details.
 
 ```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1
+.\scripts\install.ps1 -InstallPython
 ```
 
-Provisiona el entorno de Python, descarga los modelos, elige la precisión según la
-GPU que encuentre, escribe la configuración con rutas absolutas, compila la app y
-**comprueba que arranca de verdad** — lanza el sidecar, carga el modelo en la GPU y
-le habla el protocolo real.
+That sets up the Python environment, downloads the models, picks the right precision
+for whatever GPU it finds, writes the config with absolute paths, builds the app, and
+**checks it actually works** — it launches the sidecar, loads the model onto the GPU
+and speaks the real protocol to it.
 
-Si algo deja de ir después:
+If something breaks later:
 
 ```bash
-cd E:\projects\LiveTranscriber; .\scripts\verify.ps1
+.\scripts\verify.ps1
 ```
 
-Y para el día a día:
+Day to day:
 
 ```bash
-cd E:\projects\LiveTranscriber; npm run app:dev
+npm run app:dev
 ```
 
-## Probar sin interfaz
+## How it is put together
 
-`asr-cli` existe para diagnosticar sin levantar la GUI ni cargar el modelo.
+A Cargo workspace with the logic in crates that know nothing about Tauri, and
+`src-tauri` as a thin layer that only translates to the UI.
 
-```bash
-cd E:\projects\LiveTranscriber; cargo run -p asr-cli -- devices
+```
+crates/asr-audio    WASAPI capture, gain normalisation, silence gate
+crates/asr-core     engine, session, transcript, configuration
+crates/asr-cli      headless test bench
+src-tauri           commands, tray, shortcuts, events
+sidecar/            the Python processes that run the models
+src/                React 18 + Vite + TS, typed wrapper over invoke
 ```
 
-```bash
-cd E:\projects\LiveTranscriber; cargo run -p asr-cli -- level --from system --seconds 10
-```
+The flow: WASAPI → normaliser → gate → length-prefixed frames over stdin to the
+sidecar → the model returns text on stdout → `emit` to the window → React paints it.
+
+### The engines are decoupled on purpose
+
+`asr-core::AsrEngine` and `asr-core::Translator` are traits. Today the only
+implementations shell out to Python, which drags in a ~5 GB PyTorch environment.
+Swapping either for an ONNX engine in pure Rust means implementing the trait again and
+changing the line that constructs it — neither the capture layer nor the UI notices.
+
+## Headless testing
+
+`asr-cli` exists to diagnose things without starting the GUI or loading the model.
 
 ```bash
-cd E:\projects\LiveTranscriber; cargo run -p asr-cli -- run --from system --seconds 30 --language es-ES
+cargo run -p asr-cli -- devices
 ```
 
 ```bash
-cd E:\projects\LiveTranscriber; cargo run -p asr-cli -- run --from system --seconds 40 --language es-ES --translate-to en-US
+cargo run -p asr-cli -- level --from system --seconds 10
 ```
 
-`level` es el primero que hay que mirar si algo no va: dice si entra audio, a qué
-nivel, y cuánta ganancia hace falta.
+```bash
+cargo run -p asr-cli -- run --from system --seconds 30 --language es-ES
+```
 
-## Tres cosas que se descubrieron midiendo
+```bash
+cargo run -p asr-cli -- run --from system --seconds 40 --language es-ES --translate-to en-US
+```
 
-Ninguna es obvia y las tres condicionan el diseño.
+`level` is the first thing to check when something is wrong: it tells you whether
+audio is arriving, at what level, and how much gain is being applied.
 
-### 1. El loopback captura *después* del control de volumen
+## Five things that only turned up by measuring
 
-Un tono de origen con rms **0,6364** se capturó por loopback a rms **0,00252**:
-**48 dB de atenuación**, que es exactamente lo que tenía el deslizador de Windows.
+None of them is obvious, and all five shaped the design.
 
-Consecuencia: con el volumen bajo, al modelo le llega prácticamente silencio y no
-transcribe nada — sin ningún error que lo explique. Por eso hay un normalizador de
-ganancia (`asr-audio::Normalizer`) activado por defecto, que sigue el pico reciente
-y reescala. Cuando se queda sin margen, la interfaz avisa de que subas el volumen.
+### 1. Loopback captures *after* the volume control
 
-Y sí: **si silencias Windows, no se transcribe nada.** No hay forma de evitarlo por
-esta vía.
+A source tone at rms **0.6364** came back through loopback at rms **0.00252** —
+**48 dB of attenuation**, which is exactly where the Windows volume slider was.
 
-### 2. El nivel de audio no sirve para decidir donde acaba un párrafo
+The consequence: with the volume down, the model receives near-silence and transcribes
+nothing, with no error to explain it. Hence the gain normaliser
+(`asr-audio::Normalizer`), on by default, which tracks the recent peak and rescales.
+When it runs out of headroom the UI says so.
 
-Este fue el error de diseño más caro, y tuvo dos vidas.
+And yes: **mute Windows and nothing gets transcribed.** There is no way around that
+through this route.
 
-Primero se cortaban los párrafos con un umbral **absoluto** en dBFS. Mal: el habla
-por loopback llegaba a −62 dBFS (por lo del punto anterior), así que un umbral de
-−50 la descartaba entera. Y con el normalizador compensando hasta ×64, el ruido de
-fondo subía por encima de cualquier umbral fijo y el gate no volvía a cerrar nunca.
+### 2. Audio level is the wrong signal for deciding where a paragraph ends
 
-Se cambió a un umbral **relativo** al habla reciente —entre voz y pausa hay 20-30 dB
-sin importar el volumen del sistema— y eso arregló el caso de una habitación silenciosa.
-Pero seguía roto en el caso real: **con música de fondo el nivel nunca baja**, así que
-el párrafo no cerraba jamás. Y como la traducción se disparaba al cerrar, tampoco
-llegaba nunca. Se veía como "la traducción tarda muchísimo".
+This was the most expensive design mistake, and it had two lives.
 
-La señal correcta no es el audio: **es el propio reconocedor**. Si suena música pero
-nadie habla, el modelo no emite texto. Así que un párrafo se cierra cuando el modelo
-lleva `paragraph_idle_secs` sin transcribir nada nuevo, con un tope de
-`paragraph_max_secs` para los monólogos sin pausas.
+The first version cut paragraphs on an **absolute** dBFS threshold. Wrong twice over:
+speech arriving through loopback measured −62 dBFS (see above), so a −50 dBFS threshold
+discarded all of it; and with the normaliser compensating by up to ×64, background
+noise rises above any fixed threshold and the gate **never closes again** — the whole
+session becomes one endless paragraph.
 
-Verificado con música sonando sin interrupción y tres intervenciones habladas encima:
-cuatro párrafos, cada uno cerrado y traducido.
+Switching to a threshold **relative** to recent speech fixed the quiet-room case:
+there is 20–30 dB between speech and a pause regardless of system volume. But the real
+case was still broken: **with background music the level never drops**, so paragraphs
+never closed. And since translation fired on paragraph close, it never arrived either.
+It looked like "translation takes forever".
 
-Al gate de audio le queda solo decidir si merece la pena gastar GPU en un bloque. Ya
-no decide párrafos.
+The right signal is not the audio, it is **the recogniser itself**. If music is playing
+but nobody is speaking, the model emits no text. So a paragraph closes when the model
+has gone `paragraph_idle_secs` without transcribing anything new, capped by
+`paragraph_max_secs` for uninterrupted monologues.
 
-### 3. Un umbral de silencio absoluto no vale ni para eso
+Verified with music playing continuously and three spoken passages over it: four
+paragraphs, each closed and translated.
 
-La primera versión del gate comparaba con un umbral fijo en dBFS. Estaba mal, y dos
-medidas lo demostraron:
+The audio gate now only decides whether a block is worth spending GPU on, and it
+decides that on the **raw** level, before normalisation.
 
-- El habla capturada por loopback llegaba a rms 0,0005 (**−62 dBFS**), por lo del punto
-  anterior. Un umbral de −50 dBFS la descartaba entera.
-- Con el normalizador compensando hasta ×64, el ruido de fondo sube por encima de
-  cualquier umbral fijo y el gate **no vuelve a cerrar nunca**: toda la sesión queda
-  como un único párrafo interminable, sin saltos de línea.
+### 3. An idle output device produces no events at all
 
-Hablar y callarse es una diferencia **relativa** —entre voz y pausa hay 20-30 dB— sin
-importar a qué volumen esté el sistema. Así que el gate sigue el nivel del habla
-reciente (ataque inmediato, caída lenta) y considera pausa lo que caiga `gate_drop_db`
-por debajo. El umbral absoluto se queda solo como suelo, a −80 dBFS.
+Capturing loopback from a device with nothing playing returned **zero blocks** — not
+blocks of silence. WASAPI simply never fires the event.
 
-El gate decide con el nivel **crudo**, antes de normalizar, que es la medida que de
-verdad distingue voz de pausa.
+That is why the capture loop treats `EventTimeout` as normal rather than an error.
+Without it, the app would fail on startup whenever nothing happened to be playing.
 
-### 4. Un dispositivo de salida ocioso no genera ni un evento
+### 4. NVIDIA's own streaming example breaks at lookahead 0
 
-Capturando por loopback un dispositivo por el que no sonaba nada llegaron **cero
-bloques**, no bloques de silencio. WASAPI simplemente no dispara el evento.
+With `lookahead = 0` the first chunk covers a single mel frame, so the first chunk of
+the loop asks for sample `1×160 − 256 = −96`. NumPy reads that negative as an index
+from the end and returns an empty slice, and the STFT blows up. Here it is padded with
+silence.
 
-Por eso el bucle de captura trata `EventTimeout` como situación normal y no como
-error. Sin eso, la app fallaría al arrancar siempre que no hubiera nada sonando.
+### 5. NLLB drops sentences if you hand it a paragraph
 
-### 5. El ejemplo oficial de NVIDIA se rompe con lookahead 0
+Covered under [Translation](#translation) — it is the reason translation runs
+sentence by sentence and is only grouped for display.
 
-Heredado del proyecto del modelo: con `lookahead = 0` el chunk inicial cubre 1 solo
-frame mel, así que el primer chunk del bucle pide la muestra `1×160 − 256 = −96`.
-NumPy lee ese negativo como índice desde el final y devuelve un slice vacío, y el
-STFT revienta. Aquí se rellena con silencio, igual que en el proyecto del modelo.
+## Three more from the installer, which only showed up in a clean room
 
-### Y tres del instalador, que solo salieron probando en limpio
+All three were invisible on the development machine. They surfaced when the installer
+ran against a copy of the project with no `.venv` and no configuration.
 
-Los tres eran invisibles en la máquina de desarrollo. Salieron al ejecutar el
-instalador sobre una copia del proyecto sin `.venv` ni configuración.
+**`librosa` is required, even though Rust does the capture.** The dependency list was
+derived by reading the sidecars' imports and came out short: `transformers`, `numpy`,
+`huggingface_hub`. But `NemotronAsrStreamingFeatureExtractor` declares `librosa` as a
+*required backend*, so `AutoProcessor.from_pretrained` fails with `ImportError` before
+it ever looks at audio. It was already installed in the dev environment from earlier
+work, so it never showed.
 
-**`librosa` sí hace falta, aunque el audio lo capture Rust.** Deduje la lista de
-dependencias leyendo los `import` de los sidecars y me salió corta: `transformers`,
-`numpy` y `huggingface_hub`. Pero `NemotronAsrStreamingFeatureExtractor` declara
-`librosa` como *backend obligatorio*, así que `AutoProcessor.from_pretrained` falla
-con `ImportError` antes de mirar ningún audio. En el entorno de desarrollo estaba ya
-instalada de pruebas anteriores, así que nunca dio la cara.
+**`$ErrorActionPreference = "Stop"` kills PowerShell scripts.** Anything an `.exe`
+writes to stderr becomes a *terminating* error, and `2>$null` does not prevent it — it
+only hides the text. A probe as innocent as "is torch installed?" aborted the installer
+with Python's traceback, and a single `pip` warning would have done the same mid-run.
+Native calls now go through a wrapper that drops the preference to `Continue` and
+decides on the exit code.
 
-**`$ErrorActionPreference = "Stop"` mata los scripts de PowerShell.** Cualquier cosa
-que un `.exe` escriba en stderr se convierte en error *terminante*, y `2>$null` no lo
-evita: solo esconde el texto. Una sonda tan inocente como "¿está torch instalado?"
-abortaba el instalador con el traceback de Python, y un simple aviso de `pip` habría
-hecho lo mismo a mitad de instalación. Todas las llamadas nativas pasan ahora por un
-envoltorio que baja la preferencia a `Continue` y decide por el código de salida.
+**The `.msi` shipped without the translation sidecar.** `tauri.conf.json` declared only
+`asr_server.py` as a resource, so an MSI install would have transcribed but failed to
+translate. And the bundle lands in `target\release\bundle`, not
+`src-tauri\target\release\bundle` — in a Cargo workspace `target` sits at the root.
 
-**El `.msi` no llevaba el sidecar de traducción.** `tauri.conf.json` declaraba como
-recurso solo `asr_server.py`, así que una instalación con el MSI habría transcrito
-pero fallado al traducir. Y el bundle no sale en `src-tauri\target\release\bundle`
-sino en `target\release\bundle`, porque al ser un workspace de Cargo el directorio
-`target` está en la raíz.
+## And four from the Tauri layer
 
-### Y dos más de la capa Tauri
+**COM is per-thread, and Tauri's thread is STA.** WebView2 leaves the thread that
+serves Tauri commands in STA, so `initialize_mta()` fails there with
+`RPC_E_CHANGED_MODE` (0x80010106) and the device list came back empty with a red error.
+`list_devices` now enumerates on its own thread, where the MTA is always clean.
 
-**COM es por hilo, y el hilo de Tauri está en STA.** WebView2 deja el hilo desde el
-que Tauri atiende los comandos en STA, así que `initialize_mta()` falla allí con
-`RPC_E_CHANGED_MODE` (0x80010106) y la lista de dispositivos se quedaba vacía con un
-error en rojo. `list_devices` enumera ahora en un hilo propio, donde siempre hay un
-MTA limpio.
+**The working directory cannot be trusted.** `tauri dev` launches the binary from
+`src-tauri/`, not the root, so a relative path like `sidecar/asr_server.py` resolved to
+`src-tauri/sidecar/asr_server.py` and the app reported *sidecar not found*. An
+installed `.exe` or a shortcut has yet another cwd. Relative paths are now searched
+across several bases (cwd, the executable's directory walking up, and the bundle's
+resource directory), and if nothing matches the error **lists everywhere it looked**.
 
-Los nombres se forman como `AAAA_MM_DD_<nombre>.<ext>`, con el nombre base
-configurable y sufijo por formato (`_traducida`, `_bilingue`). Si ya existe uno igual
-ese día se añade `_2`, `_3`… en vez de sobrescribir: dos exportaciones del mismo día
-con el mismo nombre son normales, y perder la primera en silencio no lo es.
+Careful with the root marker: the sidecar is declared as a bundle resource, so Tauri
+also copies it to `target/debug/sidecar/`, which makes it useless for identifying the
+real project root. `transcriber-config.example.toml` is used instead, since nothing
+copies that.
 
-**Las transcripciones acabaron donde nadie las buscaba.** Consecuencia del mismo
-problema: `output_dir` valía `"."`, que se resuelve contra el directorio de trabajo del
-proceso. Con `tauri dev` eso es `src-tauri/`, así que ahí aparecieron los `.txt` y
-`.srt` sin que nadie lo pidiera. Ahora la carpeta se elige con un selector
-(`tauri-plugin-dialog`), se guarda absoluta en la configuración, y una ruta relativa en
-el TOML se ignora en favor de `Documentos\LiveTranscriber`. La interfaz muestra la ruta
-efectiva para que nunca haya duda, y el comando de exportación recibe solo el nombre
-del fichero: la carpeta la decide Rust.
+**Exported transcripts ended up where nobody would look.** Same root cause:
+`output_dir` was `"."`, resolved against the process working directory. Under
+`tauri dev` that is `src-tauri/`, so `.txt` and `.srt` files appeared there unasked.
+The folder is now chosen with a picker (`tauri-plugin-dialog`) and stored absolute; a
+relative path in the TOML is ignored in favour of `Documents\LiveTranscriber`. The UI
+shows the effective path so there is never any doubt, and the export command receives
+only a filename — Rust decides the folder.
 
-**El directorio de trabajo no es de fiar.** `tauri dev` lanza el binario desde
-`src-tauri/`, no desde la raíz, así que una ruta relativa como
-`sidecar/asr_server.py` se resolvía a `src-tauri/sidecar/asr_server.py` y la app
-decía *no encuentro el sidecar*. Un `.exe` instalado o un acceso directo tienen
-todavía otro cwd. Ahora las rutas relativas se buscan en varias bases (cwd, el
-directorio del ejecutable subiendo niveles, y el directorio de recursos del bundle),
-y si no aparece el error **lista dónde ha mirado**.
+Filenames are `YYYY_MM_DD_<name>.<ext>`, with a configurable base name and a
+per-format suffix (`_traducida`, `_bilingue`). If one already exists that day, `_2`,
+`_3`… is appended rather than overwriting: two exports on the same day with the same
+name are normal, and silently losing the first one is not.
 
-Ojo con el marcador de raíz: el sidecar está declarado como recurso del bundle, así
-que Tauri lo copia también a `target/debug/sidecar/` y no sirve para distinguir la
-raíz de verdad. Para eso se usa `transcriber-config.example.toml`, que no se copia.
+Installed via MSI the app lives in `Program Files`, where a non-admin user cannot
+write, so the config falls back to `%APPDATA%\LiveTranscriber\`. Writability is tested
+by actually writing a file, because inspecting ACLs on Windows is unreliable.
 
-**Vite puede escuchar solo en IPv6.** Sin `server.host` explícito, Vite se ató a
-`::1` mientras el `devUrl` de Tauri apunta a `127.0.0.1`: la ventana mostraba un
-`ERR_CONNECTION_REFUSED` del navegador en vez de la interfaz. `vite.config.ts` fija
-ahora `host: "127.0.0.1"`.
+**Vite may listen on IPv6 only.** Without an explicit `server.host`, Vite bound to
+`::1` while Tauri's `devUrl` points at `127.0.0.1`: the window showed a browser
+`ERR_CONNECTION_REFUSED` instead of the UI. `vite.config.ts` now pins
+`host: "127.0.0.1"`.
 
-Los dos son invisibles si solo compruebas que la app "arranca": el proceso vive y la
-ventana tiene el título correcto en ambos casos. Hizo falta mirar una captura.
+The last two are invisible if you only check that the app "starts": the process lives
+and the window title is correct in both cases. It took looking at a screenshot.
 
-## Traducción
+## Translation
 
-**El modelo de voz no traduce.** Se comprobó de dos formas: el model card no lo
-menciona en ningún sitio (su parámetro `target_lang` es el idioma *de origen*, pese
-al nombre), y el propio modelo lo confirma — sus 121 prompts son todos locales y su
-vocabulario de 13.089 tokens no tiene ni un token de tarea. No hay por dónde pedírselo.
+**The speech model does not translate.** Checked two ways: the model card never
+mentions it (its `target_lang` parameter is the *source* language, despite the name),
+and the model itself confirms it — all 121 prompts are locales and its 13,089-token
+vocabulary contains no task token. There is no way to ask.
 
-Así que la traducción es un segundo paso encadenado, con
-[NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M)
-en su propio sidecar. Uno solo da servicio a todas las fuentes.
+So translation is a second, chained step, with NLLB-200 in its own sidecar. A single
+one serves every source.
 
-**Se traduce frase a frase, y se muestra agrupado por párrafos.** Esa combinación sale
-de dos intentos fallidos:
+**Translation runs sentence by sentence and is grouped by paragraph for display.**
+That combination is the result of two failed attempts:
 
-1. Traducir por frases **y mostrarlas por frases**: quedaba troceado y no encajaba con
-   la transcripción, que va por párrafos.
-2. Esperar a que el párrafo cerrara y traducirlo entero: dos problemas a la vez.
-   **NLLB se comía contenido** —de *"La primera parte consiste en capturar el audio del
-   sistema. Eso ya funciona bien."* solo devolvía la primera frase, porque está
-   entrenado a nivel de frase— y sobre todo la traducción **tardaba una eternidad**,
-   porque no salía nada hasta el cierre del párrafo.
+1. Translating per sentence **and showing per sentence**: choppy, and it did not match
+   the transcript, which runs in paragraphs.
+2. Waiting for the paragraph to close and translating it whole: two problems at once.
+   **NLLB ate content** — given *"La primera parte consiste en capturar el audio del
+   sistema. Eso ya funciona bien."* it returned only the first sentence, because it is
+   trained at sentence level — and above all the translation **took forever**, since
+   nothing appeared until the paragraph closed.
 
-Lo que hay ahora: cada frase se traduce en cuanto su puntuación la cierra (~160 ms) y
-se etiqueta con el párrafo al que pertenece. La interfaz junta las que comparten
-etiqueta y las pinta como un bloque. Latencia de una frase, presentación por párrafos,
-y ninguna frase perdida.
+What it does now: each sentence is translated as soon as its punctuation closes it
+(~160 ms) and tagged with the paragraph it belongs to. The UI joins sentences sharing a
+tag and paints them as one block. One sentence of latency, paragraph presentation, and
+nothing lost.
 
-Medido aquí: **~160 ms por frase** y **1,27 GB de VRAM**. Con el ASR son ~3,7 GB de
-los 12 de la tarjeta.
+Measured here: **~160 ms per sentence** and **1.27 GB of VRAM**. With the ASR model
+that is ~3.7 GB of the card's 12.
 
-**Limitación heredada de NLLB:** necesita saber el idioma de origen, así que para
-traducir hay que elegir un idioma concreto en vez de *Detectar automáticamente*. La
-app lo avisa en vez de traducir desde un idioma equivocado.
+**Inherited NLLB limitation:** it needs to know the source language, so translating
+requires picking a concrete language rather than *auto-detect*. The app says so instead
+of translating from the wrong language.
 
-**Licencia:** NLLB-200 es **CC-BY-NC-4.0, uso no comercial**. Para uso personal no hay
-problema; para un producto habría que cambiarlo por Opus-MT o MADLAD-400, que es
-implementar `Translator` otra vez y nada más.
+**Licence:** NLLB-200 is **CC-BY-NC-4.0, non-commercial**. Fine for personal use; for a
+product it would have to be swapped for Opus-MT or MADLAD-400, which means implementing
+`Translator` again and nothing else.
 
-Es una cascada, con lo que eso implica: si el reconocimiento oye mal una palabra, la
-traducción propaga el error. No es interpretación simultánea profesional, es
-subtitulado traducido con una frase de retardo.
+It is a cascade, with everything that implies: if recognition mishears a word, the
+translation propagates the error. This is translated subtitling one sentence behind,
+not professional simultaneous interpretation.
 
-## Portabilidad
+## Measured performance (RTX 3060)
 
-### Otra GPU NVIDIA en Windows
+| lookahead | latency | RTFx | concurrent streams |
+|---|---|---|---|
+| 0 | 80 ms | 1.8x | ~1 |
+| 3 (default) | 320 ms | 4.6x | ~4 |
+| 6 | 560 ms | 6.3x | ~6 |
+| 13 | 1120 ms | 9.4x | ~9 |
 
-Funciona sin tocar nada, con un matiz de precisión. El model card lista como
-soportadas *"NVIDIA Ampere, NVIDIA Blackwell, NVIDIA Hopper, NVIDIA Jetson, NVIDIA
-Lovelace, NVIDIA Turing, NVIDIA Volta"*, así que el modelo va también en Turing (RTX
-20xx) y Volta.
+Capturing system audio **and** the microphone at once means two sessions, each with its
+own Python process and its own copy of the model in VRAM (~2.4 GB each). At lookahead 3
+the 3060 handles it comfortably.
 
-Pero **bfloat16 necesita Ampere o superior** (capability 8.0+). En una Turing PyTorch
-no falla: lo *emula*, y la app va lentísima sin ninguna pista de por qué —
-`is_bf16_supported()` devuelve `True` por emulación salvo que le pases
-`including_emulation=False`. Los sidecars detectan la capability y bajan a float16
-avisando por el log.
+## Portability
 
-El coste es real: medido en este modelo, float16 transcribe peor (mete muletillas
-inexistentes) y va más lento que bf16 (RTFx 8,7 frente a 15,7). Con float32 no hay
-pérdida de calidad pero sube la VRAM y baja el ritmo.
+### Another NVIDIA GPU on Windows
 
-**Varias GPU no aportan nada tal como está.** Cada sidecar coge un solo dispositivo
-(`cuda`, es decir `cuda:0`), así que una segunda tarjeta se quedaría parada.
-Repartirlas sería un cambio pequeño —pasarle `--device cuda:1` a un sidecar— pero no
-merece la pena: una sola tarjeta ya aguanta ~4 flujos a 320 ms y aquí se usan uno o dos.
-La GPU no es el cuello de botella.
+Works unchanged, with one caveat about precision. The model card lists *"NVIDIA Ampere,
+NVIDIA Blackwell, NVIDIA Hopper, NVIDIA Jetson, NVIDIA Lovelace, NVIDIA Turing, NVIDIA
+Volta"*, so Turing (RTX 20xx) and Volta are covered.
+
+But **bfloat16 needs Ampere or newer** (capability 8.0+). On Turing PyTorch does not
+fail, it *emulates*, and the app crawls with no hint why —
+`is_bf16_supported()` returns `True` via emulation unless you pass
+`including_emulation=False`. The installer reads the capability and writes `float16`;
+the sidecars check again at startup and warn.
+
+The cost is real: measured on this model, float16 transcribes worse (it inserts filler
+words that were never said) and runs slower than bf16 (RTFx 8.7 versus 15.7). float32
+loses no quality but raises VRAM and lowers throughput.
+
+**Multiple GPUs buy nothing as built.** Each sidecar takes a single device (`cuda`,
+i.e. `cuda:0`), so a second card would sit idle. Splitting them across cards is a small
+change — pass `--device cuda:1` to one sidecar — but not worth it: one card already
+handles ~4 streams at 320 ms and this uses one or two. The GPU is not the bottleneck.
 
 ### macOS / Apple Silicon
 
-**Hoy no funciona**, y son dos problemas independientes.
+**Does not work today**, and there are two independent problems.
 
-**La captura es Windows-only por construcción.** WASAPI, con 17 `cfg(windows)` en
-`asr-audio`. En macOS el crate compila pero `list_devices` y `spawn_capture` devuelven
-`UnsupportedPlatform`: la app arrancaría y no capturaría nada. Todo lo de arriba
-—`asr-core`, Tauri, React— es agnóstico de plataforma, así que el trabajo se concentra
-en un backend nuevo detrás de la misma API.
+**Capture is Windows-only by construction.** WASAPI, with 17 `cfg(windows)` gates in
+`asr-audio`. On macOS the crate compiles but `list_devices` and `spawn_capture` return
+`UnsupportedPlatform`: the app would start and capture nothing. Everything above it —
+`asr-core`, Tauri, React — is platform-agnostic, so the work concentrates in a new
+backend behind the same API.
 
-La buena noticia es que ya no hace falta un dispositivo virtual tipo BlackHole:
-macOS 14.4 añadió los *Core Audio Process Taps*, que permiten capturar el audio del
-sistema con permiso del usuario, y [cpal](https://github.com/RustAudio/cpal/releases)
-trae loopback por CoreAudio para macOS > 14.6.
+The good news is that a virtual device like BlackHole is no longer needed: macOS 14.4
+added *Core Audio Process Taps*, which capture system audio with the user's permission,
+and [cpal](https://github.com/RustAudio/cpal/releases) ships CoreAudio loopback for
+macOS > 14.6.
 
-**Lo arriesgado no es el port, es el modelo.** El model card solo lista *"Linux, Linux 4
-Tegra"* como sistema operativo, y solo arquitecturas CUDA. En un Mac habría que ir por
-MPS, y ahí los riesgos concretos son el decodificador LSTM del RNNT y la cobertura de
-bfloat16. El respaldo sería CPU, y no tengo ninguna medida de RTFx en CPU ni en M1: las
-cifras de este README son de una 3060.
+**The risky part is not the port, it is the model.** The model card lists only *"Linux,
+Linux 4 Tegra"* as the operating system, and only CUDA architectures. On a Mac you
+would go through MPS, where the concrete risks are the RNNT's LSTM decoder and
+bfloat16 coverage. The fallback is CPU, and there is no RTFx measurement for CPU or M1
+here — every figure in this README comes from a 3060.
 
-Antes de escribir una línea de captura para macOS, lo sensato es probar el modelo solo
-en el Mac con un script de veinte líneas. Si en MPS no da tiempo real, el port de audio
-sobra.
+Before writing a line of macOS capture code, the sensible move is to test the model
+alone on the Mac with a twenty-line script. If MPS cannot keep up with real time, the
+audio port is moot.
 
-## Rendimiento medido (RTX 3060)
+## Design notes
 
-| lookahead | latencia | RTFx | flujos simultáneos |
-|---|---|---|---|
-| 0 | 80 ms | 1,8x | ~1 |
-| 3 (defecto) | 320 ms | 4,6x | ~4 |
-| 6 | 560 ms | 6,3x | ~6 |
-| 13 | 1120 ms | 9,4x | ~9 |
+**The gate does not drop short silences.** The model is cache-aware and its state
+assumes contiguous audio; removing chunks would produce garbage at the joins.
+Everything within a paragraph is passed through.
 
-Capturar sistema **y** micro a la vez son dos sesiones, cada una con su proceso
-Python y su copia del modelo en VRAM (~2,4 GB cada una). A lookahead 3 la 3060 lo
-lleva de sobra.
+**Per-process loopback.** `CaptureTarget::Process { pid }` uses
+`ActivateAudioInterfaceAsync` to capture only one process's audio — Teams without the
+music playing alongside it. Implemented in the crate and exposed in the CLI (`--pid`),
+but not yet in the UI.
 
-## Detalles de diseño
+**Closing the window does not quit the app**, it sends it to the tray.
 
-**El gate no descarta los silencios cortos.** El modelo es cache-aware y su estado
-asume audio contiguo; quitar trozos produciría basura en las uniones. Dentro de un
-segmento pasa todo, y solo tras un silencio largo (2 s por defecto) se cierra el
-segmento y se reinicia el modelo. Eso además da los puntos de corte naturales para
-las líneas del `.srt`.
+## Status
 
-**Loopback por proceso.** `CaptureTarget::Process { pid }` usa
-`ActivateAudioInterfaceAsync` para capturar solo el audio de un proceso concreto —
-Teams sin que se cuele la música. Está implementado en el crate y expuesto en el CLI
-(`--pid`), pero todavía no en la interfaz.
+Verified end to end through the CLI with real loopback audio: capture, normalisation,
+gate, sidecar protocol, transcription, translation and export to `.txt` and `.srt`. The
+UI has been verified visually — both tabs render, the split layout works, the low-volume
+warning fires, and the global shortcut starts a session.
 
-**Cerrar la ventana no cierra la app**, la manda a la bandeja, como TapoController.
+39 unit tests in `cargo test --workspace` covering the gate, the normaliser, sentence
+splitting, FLORES-200 language mapping, the transcript, filename generation and
+configuration round-trips.
 
-## Estado
-
-Verificado de punta a punta con el CLI: captura loopback real, normalización, gate,
-protocolo con el sidecar, transcripción y exportación a `.txt` y `.srt`. La prueba
-grabó dos frases separadas por una pausa y el gate las partió en dos líneas
-correctas, con sus tiempos.
-
-18 tests unitarios en `cargo test --workspace` (gate, normalizador, transcripción,
-configuración).
-
-**Sin verificar todavía:** la interfaz gráfica en ejecución (ventana, bandeja,
-atajos globales y overlay). El código compila y los comandos están cableados, pero
-no se ha hecho una pasada visual.
-
-
-
-## rediseño
-
-Cuando dije de dividir las ventanas solo me referia a transcripción y traducción. Osea tener una pestaña con la configuración y otra con la transcripción y traducción, y esta ultima es la que se puede cambiar a dividido o combinado.
-
+**Not verified:** the tray menu and global shortcuts responding to actual clicks and
+key presses beyond the one start/stop test, and the `%APPDATA%` config fallback, which
+needs a real MSI install to exercise.

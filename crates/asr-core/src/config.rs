@@ -121,9 +121,12 @@ pub struct SpeakConfig {
     /// Caracteres a juntar antes de sintetizar. Chatterbox tiene ~1 s de
     /// coste fijo por llamada (medido): con frases sueltas queda por debajo
     /// de tiempo real y el retraso crece sin limite; con bloques de ~250
-    /// caracteres pasa de 1x y queda acotado.
+    /// caracteres pasa de 1x y queda acotado. Solo aplica con la voz aun
+    /// sonando: callada, la primera frase sale al momento (esperar ahi
+    /// seria latencia pura) y las siguientes se agrupan mientras suena.
     pub group_max_chars: usize,
-    /// La frase mas vieja no espera mas que esto, aunque el bloque sea corto.
+    /// Con la voz sonando, la frase mas vieja no espera mas que esto aunque
+    /// el bloque sea corto.
     pub group_max_wait_ms: u64,
     /// Reconocer la propia voz sintetica si vuelve por la captura del
     /// sistema, y marcarla en vez de re-traducirla (es->en->es sale raro).

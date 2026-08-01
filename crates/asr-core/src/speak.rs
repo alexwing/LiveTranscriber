@@ -179,19 +179,6 @@ impl EchoRegistry {
         });
     }
 
-    /// ¿Esta la voz sintetica sonando (o acabada de sonar)? Cada entrada se
-    /// registra con una validez que cubre cola + duracion + margen, asi que
-    /// "hay alguna viva" equivale a "la voz esta o estuvo hace nada en el
-    /// aire". Es la base de la guardia anti-bucle: el casado por texto no
-    /// funciona entre idiomas (el ASR del micro, clavado a mi idioma, no
-    /// devuelve literal el audio en el de la sala), pero el tiempo si.
-    pub fn voice_on_air(&self) -> bool {
-        let mut spoken = self.spoken.lock().unwrap();
-        let now = Instant::now();
-        spoken.retain(|s| s.expires > now);
-        !spoken.is_empty()
-    }
-
     /// ¿Es esto un eco de algo que la voz sintetica acaba de decir?
     pub fn matches(&self, heard: &str) -> bool {
         let heard = Self::tokens(heard);
@@ -258,6 +245,12 @@ pub struct SpeechPumpConfig {
 /// Margen extra de validez de una entrada del registro de eco, por encima de
 /// la duracion del propio audio: cubre el retardo del ASR y del corte de
 /// frases en volver a oirla.
+///
+/// Es deliberadamente generoso porque solo alarga la MEMORIA para comparar
+/// texto: recordar de mas no cuesta nada. No sirve como ventana para callar
+/// al hablante — se intento y se comio frases enteras del usuario, porque
+/// "mi voz hace eco" y "sigo hablando encima" ocurren en el mismo instante y
+/// el tiempo no los distingue.
 const ECHO_GRACE: Duration = Duration::from_secs(10);
 
 /// Une el sintetizador con la salida de audio: recibe textos ya traducidos,
@@ -386,6 +379,14 @@ impl SpeechPump {
         if self.pending.is_empty() {
             return false;
         }
+        // Agrupar existe para amortizar el coste fijo por peticion CUANDO SE
+        // VA POR DETRAS. Con la voz callada (nada encolado ni sonando),
+        // esperar es latencia pura: la primera frase sale ya, y mientras
+        // suena, las siguientes se agrupan solas. Medido: esto quita hasta
+        // 2 s del camino hablo->me-oyen en el caso conversacional tipico.
+        if self.queued_samples.load(Ordering::Relaxed) == 0 {
+            return true;
+        }
         let chars: usize = self.pending.iter().map(|t| t.len()).sum();
         if chars >= self.cfg.group_max_chars {
             return true;
@@ -398,13 +399,16 @@ impl SpeechPump {
     /// sentido seguir (el sidecar murio o la salida de audio se cerro).
     fn flush(&mut self) -> bool {
         let block = self.pending.join(" ");
-        self.pending.clear();
-        self.oldest = None;
 
         let synthesized = match self.synth.synthesize(&block, &self.cfg.lang) {
-            // El sidecar muerto es irrecuperable: sin esto, la bomba quedaria
-            // zombie descartando bloque tras bloque con un error cada vez.
-            Err(EngineError::Closed) => {
+            // Sidecar muerto: irrecuperable. Hay que mirar tambien `Io`, no
+            // solo `Closed`: cuando el proceso de Python cae, lo primero que
+            // falla es ESCRIBIR en su pipe (BrokenPipe -> Io), antes de que
+            // el lector note el EOF que produciria `Closed`. Comprobado: con
+            // `Io` la bomba seguia viva descartando un bloque por frase el
+            // resto de la sesion.
+            Err(e @ (EngineError::Closed | EngineError::Io(_))) => {
+                tracing::error!("el sintetizador murio: {e}");
                 let _ = self.events.send(SpeechEvent::Error {
                     message: "el sintetizador murio; la voz queda muda (el motivo \
                               esta en el log, lineas 'sintetizador')"
@@ -413,10 +417,12 @@ impl SpeechPump {
                 return false;
             }
             Err(e) => {
-                // Cualquier otro fallo no tumba la voz: se avisa y se sigue
-                // con el siguiente bloque, igual que una frase que no se
-                // traduce.
+                // Un fallo puntual no tumba la voz: se avisa y se sigue con
+                // el siguiente bloque. `pending` se limpia AQUI y no antes,
+                // para no perder el bloque cuando el fallo llega a mitad.
                 tracing::warn!("no se pudo sintetizar {block:?}: {e}");
+                self.pending.clear();
+                self.oldest = None;
                 let _ = self.events.send(SpeechEvent::Error {
                     message: e.to_string(),
                 });
@@ -424,6 +430,8 @@ impl SpeechPump {
             }
             Ok(s) => s,
         };
+        self.pending.clear();
+        self.oldest = None;
 
         if synthesized.rate != self.rate {
             // El render se abrio con la frecuencia del `ready`; si el sidecar
@@ -452,7 +460,12 @@ impl SpeechPump {
         self.queued_samples
             .fetch_add(synthesized.samples.len() as u64, Ordering::Relaxed);
         if self.render_tx.send(synthesized.samples).is_err() {
-            tracing::info!("la salida de audio se cerro, parando la voz");
+            tracing::error!("la salida de audio se cerro, parando la voz");
+            let _ = self.events.send(SpeechEvent::Error {
+                message: "la salida de audio se cerro; la voz queda muda \
+                          (¿sigue existiendo el dispositivo?)"
+                    .to_string(),
+            });
             return false;
         }
 
@@ -828,6 +841,92 @@ mod tests {
         reg.record("this sentence expires immediately", Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(5));
         assert!(!reg.matches("this sentence expires immediately"));
+    }
+
+    /// Sintetizador de mentira: un segundo de silencio por peticion, al
+    /// instante. Suficiente para probar el agrupador sin GPU.
+    struct FakeSynth;
+
+    impl Synthesizer for FakeSynth {
+        fn synthesize(&mut self, _text: &str, _lang: &str) -> Result<Synthesized> {
+            Ok(Synthesized {
+                samples: vec![0.0; 24_000],
+                rate: 24_000,
+                synth_ms: 1,
+            })
+        }
+        fn shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn pump_for_test(
+        queued: Arc<AtomicU64>,
+        render_tx: SyncSender<Vec<f32>>,
+    ) -> (SpeechPump, std::sync::mpsc::Receiver<SpeechEvent>) {
+        let (event_tx, event_rx) = channel();
+        let pump = SpeechPump::new(
+            Box::new(FakeSynth),
+            SpeechPumpConfig {
+                lang: "en".to_string(),
+                group_max_chars: 250,
+                group_max_wait_ms: 2000,
+            },
+            render_tx,
+            queued,
+            24_000,
+            None,
+            event_tx,
+        );
+        (pump, event_rx)
+    }
+
+    #[test]
+    fn con_la_voz_callada_la_primera_frase_no_espera_al_agrupador() {
+        // Esperar 2 s de agrupado con la cola vacia seria latencia pura.
+        let queued = Arc::new(AtomicU64::new(0));
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(4);
+        let (pump, _events) = pump_for_test(queued, render_tx);
+
+        let (text_tx, text_rx) = channel::<String>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let handle = std::thread::spawn(move || pump.run(text_rx, stop, alive));
+
+        text_tx.send("Hola.".to_string()).expect("envia");
+        // Mucho antes del group_max_wait_ms de 2000 tiene que haber audio.
+        let audio = render_rx.recv_timeout(Duration::from_millis(700));
+        assert!(audio.is_ok(), "la frase deberia sintetizarse sin esperar");
+
+        drop(text_tx);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn con_audio_pendiente_las_frases_cortas_se_agrupan() {
+        // Simula voz aun sonando: el contador de muestras pendientes no esta
+        // a cero, asi que una frase corta debe esperar a agrupar.
+        let queued = Arc::new(AtomicU64::new(48_000)); // 2 s sin reproducir
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(4);
+        let (pump, _events) = pump_for_test(queued, render_tx);
+
+        let (text_tx, text_rx) = channel::<String>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let handle = std::thread::spawn(move || pump.run(text_rx, stop, alive));
+
+        text_tx.send("Hola.".to_string()).expect("envia");
+        let audio = render_rx.recv_timeout(Duration::from_millis(700));
+        assert!(
+            audio.is_err(),
+            "con la voz sonando, una frase corta debe esperar al agrupador"
+        );
+
+        drop(text_tx);
+        // Al cerrarse el canal, lo pendiente se dice entero.
+        let audio = render_rx.recv_timeout(Duration::from_secs(2));
+        assert!(audio.is_ok(), "lo pendiente debe salir al terminar");
+        let _ = handle.join();
     }
 
     #[test]

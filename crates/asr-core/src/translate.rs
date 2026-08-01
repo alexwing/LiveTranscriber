@@ -227,6 +227,9 @@ pub struct TranslationPump {
     /// Memoria de lo que la voz sintetica acaba de decir. Solo cuando la voz
     /// esta activada; ver [`crate::speak::EchoRegistry`].
     echo: Option<std::sync::Arc<crate::speak::EchoRegistry>>,
+    /// El sidecar se murio y ya no va a traducir nada mas. Ver
+    /// [`Self::is_dead`].
+    dead: bool,
 }
 
 #[derive(Default)]
@@ -261,7 +264,15 @@ impl TranslationPump {
             system_pair: (code(sala.0, "la sala en")?, code(sala.1, "la sala a")?),
             mic_pair: (code(micro.0, "el micro en")?, code(micro.1, "el micro a")?),
             echo: None,
+            dead: false,
         })
+    }
+
+    /// ¿Se murio el sidecar? A partir de ahi no traduce nada mas, asi que
+    /// quien orquesta debe avisar al usuario en vez de seguir tragando
+    /// frases: perderlas en silencio es peor que parar.
+    pub fn is_dead(&self) -> bool {
+        self.dead
     }
 
     /// Activa el reconocimiento de la propia voz sintetica. Las frases del
@@ -358,7 +369,16 @@ impl TranslationPump {
                     translated,
                     echo: false,
                 }),
-                // Una frase que falla no debe tirar el parrafo entero.
+                // El sidecar muerto es irrecuperable: sin distinguirlo, cada
+                // frase siguiente se perderia con solo un warn en el log,
+                // para siempre y sin que nadie se entere — ni la pantalla ni
+                // la voz. Se anota y quien orquesta decide.
+                Err(e @ (EngineError::Closed | EngineError::Io(_))) => {
+                    tracing::error!("el traductor murio: {e}");
+                    self.dead = true;
+                    return out;
+                }
+                // Una frase suelta que falla no debe tirar el parrafo entero.
                 Err(e) => tracing::warn!("no se pudo traducir {sentence:?}: {e}"),
             }
         }

@@ -132,7 +132,9 @@ kokoro_voice = "af_heart"
 # Cuanto juntar antes de sintetizar. Chatterbox tiene ~1 s de coste fijo por
 # peticion (medido): con frases sueltas genera por debajo de tiempo real y el
 # retraso crece sin limite; con bloques de ~250 caracteres pasa de 1x y queda
-# acotado. La espera maxima evita que una frase suelta se quede colgada.
+# acotado. El agrupado solo actua con la voz AUN SONANDO: callada, la primera
+# frase se sintetiza al momento y las siguientes se agrupan mientras suena.
+# La espera maxima evita que una frase corta se quede colgada en un bloque.
 group_max_chars = 250
 group_max_wait_ms = 2000
 

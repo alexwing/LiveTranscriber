@@ -123,6 +123,11 @@ export default function App() {
       listen<{ device: string; target: string }>("translator-ready", ({ payload }) =>
         setStatus(`Traductor listo en ${payload.device}, destino ${payload.target}`)
       ),
+      // Los modelos tardan casi un minuto en cargar y la ventana se quedaba
+      // muda todo ese rato, que se siente como que la app se ha colgado.
+      listen<{ stage: string; message: string }>("loading", ({ payload }) =>
+        setStatus(payload.message)
+      ),
       listen<SpeechEvent>("speech-event", ({ payload }) => {
         switch (payload.kind) {
           case "ready":
@@ -188,7 +193,7 @@ export default function App() {
       if (running) {
         await api.stop();
       } else {
-        setStatus("Arrancando… la primera vez tarda unos segundos");
+        setStatus("Arrancando… cargar los modelos lleva hasta un minuto");
         await api.start();
         setTab("transcript");
       }
@@ -233,6 +238,15 @@ export default function App() {
   const autoBlocksTranslation = config.translate && config.language === "auto";
   const speakMisconfigured =
     config.speak.enabled && (!config.translate || !config.capture_mic);
+  // Voz por los altavoces con el microfono abierto: el micro recoge la propia
+  // voz sintetica, se re-traduce y se vuelve a hablar. No se puede evitar por
+  // software (callar mientras suena se come el habla real: "hace eco" y
+  // "sigo hablando" pasan a la vez), asi que se avisa y se apunta a la
+  // solucion de verdad, que es fisica.
+  const speakFeedbackRisk =
+    config.speak.enabled &&
+    config.capture_mic &&
+    config.speak.output_device_id === null;
   // Con mas de ~10 s de retraso la conversacion deja de ser conversacion.
   const speechBehind = speech !== null && speech.queuedMs > 10_000;
 
@@ -282,6 +296,14 @@ export default function App() {
           que dices por el micro.
         </p>
       )}
+      {speakFeedbackRisk && (
+        <p className="warn">
+          Tu voz sintetica va a sonar por los <em>altavoces</em> con el
+          microfono abierto: el micro puede recogerla y volver a traducirla.
+          Ponte auriculares, o elige <code>CABLE Input</code> en{" "}
+          <em>Hablar por</em> para que solo la oiga la reunion.
+        </p>
+      )}
       {speech !== null && running && (
         <p className={speechBehind ? "warn" : "status"}>
           Voz sintetica: {(speech.queuedMs / 1000).toFixed(1)} s en cola
@@ -301,6 +323,15 @@ export default function App() {
           patch={patch}
           outputDir={outputDir}
           filenamePreview={filenamePreview}
+          onRefreshDevices={async () => {
+            try {
+              setOutputs(await api.listDevices("output"));
+              setInputs(await api.listDevices("input"));
+              flash("Dispositivos actualizados");
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }}
           onPickDir={async () => {
             try {
               const picked = await api.pickOutputDir();
@@ -370,6 +401,7 @@ function ConfigPane({
   patch,
   outputDir,
   filenamePreview,
+  onRefreshDevices,
   onPickDir,
   onRevealDir,
 }: {
@@ -381,6 +413,7 @@ function ConfigPane({
   patch: (c: Partial<AppConfig>) => void;
   outputDir: string;
   filenamePreview: string;
+  onRefreshDevices: () => void;
   onPickDir: () => void;
   onRevealDir: () => void;
 }) {
@@ -420,7 +453,15 @@ function ConfigPane({
       </section>
 
       <section className="panel">
-        <h2>Fuentes</h2>
+        <div className="pane-head">
+          <h2>Fuentes</h2>
+          <button
+            title="Volver a buscar dispositivos (por ejemplo, tras enchufar unos auriculares o instalar VB-CABLE)"
+            onClick={onRefreshDevices}
+          >
+            ↻ Actualizar
+          </button>
+        </div>
         <label className="row">
           <input
             type="checkbox"
@@ -638,7 +679,13 @@ function ConfigPane({
       </section>
 
       {config.translate && (
-        <SpeakPane config={config} outputs={outputs} running={running} patch={patch} />
+        <SpeakPane
+          config={config}
+          outputs={outputs}
+          running={running}
+          patch={patch}
+          onRefreshDevices={onRefreshDevices}
+        />
       )}
     </div>
   );
@@ -652,11 +699,13 @@ function SpeakPane({
   outputs,
   running,
   patch,
+  onRefreshDevices,
 }: {
   config: AppConfig;
   outputs: AudioDevice[];
   running: boolean;
   patch: (c: Partial<AppConfig>) => void;
+  onRefreshDevices: () => void;
 }) {
   const speak = config.speak;
   const patchSpeak = (changes: Partial<SpeakConfig>) =>
@@ -760,7 +809,12 @@ function SpeakPane({
           <a href="https://vb-audio.com/Cable/" target="_blank" rel="noreferrer">
             VB-CABLE
           </a>
-          , un dispositivo virtual que se instala aparte.
+          , un dispositivo virtual que se instala aparte.{" "}
+          {/* Es aqui donde se descubre que falta, asi que el refresco tiene
+              que estar a mano: instalarlo con la app abierta es lo normal. */}
+          <button className="link-button" onClick={onRefreshDevices}>
+            Ya lo he instalado, buscar de nuevo
+          </button>
         </p>
       )}
 
@@ -808,10 +862,10 @@ function SpeakPane({
         </select>
       </label>
       <p className="note">
-        Clonar tiene un coste fijo por peticion (~1 s medido): con frases
-        sueltas la voz genera mas despacio de lo que hablas y el retraso crece
-        sin parar; agrupando ~250 caracteres queda acotado. Menos espera = sale
-        antes pero rinde menos.
+        Con la voz callada, la primera frase se pronuncia al momento. El
+        agrupado actua solo mientras suena: clonar tiene un coste fijo por
+        peticion (~1 s medido) y con frases sueltas generaria mas despacio de
+        lo que hablas; agrupando ~250 caracteres el retraso queda acotado.
       </p>
     </section>
   );

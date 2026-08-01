@@ -472,37 +472,90 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
         }
     }
 
-    // La voz sintetica se monta la primera: es opcional, pero si esta
-    // activada y no puede arrancar (falta el WAV de la voz, el venv, el
-    // idioma no tiene sintetizador), mejor un error claro ahora que una
-    // reunion en la que crees que te oyen y no te oye nadie.
-    let mut speech = None;
-    if config.speak.enabled {
-        if !config.translate || !config.capture_mic {
-            state.running.store(false, Ordering::SeqCst);
-            return Err("Hablar con tu voz necesita 'Traducir en paralelo' y \
-                        'Transcribir el microfono' activados: lo que se habla \
-                        es la traduccion de lo que dices por el micro."
-                .to_string()
-                .into());
-        }
-        match start_speech(app, &config) {
-            Ok(started) => {
-                *state.speech_stop.lock().unwrap() = Some(started.stop.clone());
-                speech = Some(started);
-            }
-            Err(e) => {
-                state.running.store(false, Ordering::SeqCst);
-                return Err(e);
-            }
+    if config.speak.enabled && (!config.translate || !config.capture_mic) {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Hablar con tu voz necesita 'Traducir en paralelo' y \
+                    'Transcribir el microfono' activados: lo que se habla \
+                    es la traduccion de lo que dices por el micro."
+            .to_string()
+            .into());
+    }
+
+    // Los dos modelos pesados se cargan A LA VEZ, cada uno en su hilo. Son
+    // procesos independientes y cargarlos en serie sumaba las dos esperas:
+    // medido aqui, 46 s la voz + 31 s el traductor = 77 s con la interfaz
+    // muda, que se siente como que la app se ha colgado. En paralelo el
+    // arranque cuesta lo que tarde el mas lento.
+    //
+    // Cada etapa avisa por `loading` segun termina, para que la ventana
+    // cuente lo que esta pasando en vez de quedarse en "Arrancando...".
+    let _ = app.emit(
+        "loading",
+        serde_json::json!({ "stage": "start", "message": "Cargando modelos…" }),
+    );
+
+    let speech_handle = if config.speak.enabled {
+        let app2 = app.clone();
+        let cfg2 = config.clone();
+        Some(std::thread::spawn(move || start_speech(&app2, &cfg2)))
+    } else {
+        None
+    };
+
+    let translator_handle = if config.translate {
+        let app2 = app.clone();
+        let cfg2 = config.clone();
+        Some(std::thread::spawn(move || start_translator(&app2, &cfg2)))
+    } else {
+        None
+    };
+
+    /// Recoge un hilo de arranque, convirtiendo el panico en un error legible
+    /// en vez de dejar la app creyendo que sigue viva.
+    fn join_stage<T>(
+        handle: Option<std::thread::JoinHandle<Result<T, CmdError>>>,
+        que: &str,
+    ) -> Result<Option<T>, CmdError> {
+        match handle {
+            None => Ok(None),
+            Some(h) => match h.join() {
+                Ok(Ok(value)) => Ok(Some(value)),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(format!("el arranque de {que} entro en panico").into()),
+            },
         }
     }
 
-    // La traduccion se monta antes que las sesiones: si el traductor no
-    // arranca, mejor enterarse sin haber abierto ya los dispositivos de audio.
+    // Se recogen los dos SIEMPRE, aunque el primero falle: si no, el hilo
+    // superviviente dejaria un sidecar de Python vivo agarrado a la VRAM.
+    let speech_result = join_stage(speech_handle, "la voz");
+    let translator_result = join_stage(translator_handle, "el traductor");
+
+    let speech = match speech_result {
+        Ok(s) => s,
+        Err(e) => {
+            // El traductor que si arranco se cierra al soltar su sidecar.
+            drop(translator_result);
+            state.running.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let translator = match translator_result {
+        Ok(t) => t,
+        Err(e) => {
+            drop(speech);
+            state.running.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+
+    if let Some(started) = &speech {
+        *state.speech_stop.lock().unwrap() = Some(started.stop.clone());
+    }
+
     let mut translation_tx = None;
-    if config.translate {
-        match start_translation(app, &config, state.transcript.clone(), speech) {
+    if let Some(translator) = translator {
+        match start_translation(app, &config, state.transcript.clone(), speech, translator) {
             Ok(sender) => translation_tx = Some(sender),
             Err(e) => {
                 state.running.store(false, Ordering::SeqCst);
@@ -559,33 +612,11 @@ struct SpeechWiring {
     texts: std::sync::mpsc::Sender<String>,
     echo: Option<Arc<EchoRegistry>>,
     stop: Arc<AtomicBool>,
-    /// Con la voz sonando por los altavoces (sin dispositivo elegido), el
-    /// microfono la recoge, y el casado por texto no la reconoce: el ASR del
-    /// micro va clavado a mi idioma y no devuelve literal el audio en el de
-    /// la sala. Sin esta guardia, eso se traduce y se vuelve a hablar: un
-    /// bucle hablandose a si mismo. Mientras la voz este en el aire, lo que
-    /// entre por el micro se transcribe pero no se re-habla.
-    suppress_while_on_air: bool,
 }
 
-/// Levanta el traductor y su hilo. Devuelve por donde mandarle los eventos.
-///
-/// Va en un hilo aparte porque traducir bloquea ~160 ms por frase, y hacerlo
-/// en la bomba de eventos frenaria el texto en vivo y el vumetro.
-fn start_translation(
-    app: &AppHandle,
-    config: &AppConfig,
-    transcript: Arc<Mutex<Transcript>>,
-    speech: Option<SpeechWiring>,
-) -> Result<std::sync::mpsc::Sender<SessionEvent>, CmdError> {
-    if config.language == "auto" {
-        return Err("Para traducir hay que elegir un idioma concreto en vez de \
-                    la deteccion automatica: el traductor necesita saber desde \
-                    que idioma parte."
-            .to_string()
-            .into());
-    }
-
+/// Carga NLLB y espera a que este listo. Es la mitad cara del arranque del
+/// traductor, y va aparte para poder correrla a la vez que la de la voz.
+fn start_translator(app: &AppHandle, config: &AppConfig) -> Result<MtSidecar, CmdError> {
     let mut mt = config.mt();
     mt.script = require_existing(app, &mt.script, "el sidecar de traduccion")?;
     mt.python = require_existing(app, &mt.python, "el interprete de Python")?;
@@ -599,7 +630,25 @@ fn start_translation(
         "translator-ready",
         serde_json::json!({ "device": device, "target": config.target_language }),
     );
+    let _ = app.emit(
+        "loading",
+        serde_json::json!({ "stage": "translator", "message": "Traductor listo" }),
+    );
+    Ok(sidecar)
+}
 
+/// Cablea el traductor ya cargado con su hilo. Devuelve por donde mandarle
+/// los eventos.
+///
+/// Va en un hilo aparte porque traducir bloquea ~160 ms por frase, y hacerlo
+/// en la bomba de eventos frenaria el texto en vivo y el vumetro.
+fn start_translation(
+    app: &AppHandle,
+    config: &AppConfig,
+    transcript: Arc<Mutex<Transcript>>,
+    speech: Option<SpeechWiring>,
+    sidecar: MtSidecar,
+) -> Result<std::sync::mpsc::Sender<SessionEvent>, CmdError> {
     let mut pump = TranslationPump::new(
         Box::new(sidecar),
         (&config.language, &config.target_language),
@@ -615,27 +664,27 @@ fn start_translation(
         .name("asr-translate".into())
         .spawn(move || {
             for event in rx {
-                for line in pump.handle(&event) {
+                let lines = pump.handle(&event);
+                if pump.is_dead() {
+                    // Sin esto la bomba quedaria zombi: cada frase perdida
+                    // con un warn en el log, para siempre, con la interfaz
+                    // diciendo que todo va bien.
+                    let _ = app.emit(
+                        "error",
+                        "El traductor se ha muerto: no se va a traducir ni hablar \
+                         nada mas. Para y vuelve a arrancar (el motivo esta en el \
+                         log, lineas 'traductor')."
+                            .to_string(),
+                    );
+                    break;
+                }
+                for line in lines {
                     // A la voz va solo lo tuyo: las frases del microfono, ya
                     // traducidas. Las de los demas se leen, no se pronuncian.
                     // Y los ecos de la propia voz sintetica, tampoco.
                     if let Some(speech) = &speech {
                         if line.source == Source::Mic && !line.echo {
-                            let on_air = speech.suppress_while_on_air
-                                && speech
-                                    .echo
-                                    .as_ref()
-                                    .is_some_and(|registry| registry.voice_on_air());
-                            if on_air {
-                                // Ver el comentario de SpeechWiring: por los
-                                // altavoces, lo captado mientras la voz suena
-                                // es casi seguro la propia voz.
-                                tracing::info!(
-                                    "micro captado con la voz en el aire; no se re-habla"
-                                );
-                            } else {
-                                let _ = speech.texts.send(line.translated.clone());
-                            }
+                            let _ = speech.texts.send(line.translated.clone());
                         }
                     }
                     transcript.lock().unwrap().push_translation(line.clone());
@@ -712,6 +761,10 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
         ready.device,
         ready.rate,
         tts.engine
+    );
+    let _ = app.emit(
+        "loading",
+        serde_json::json!({ "stage": "voice", "message": "Voz lista" }),
     );
 
     // La salida de audio: para hacer de microfono virtual, el id de CABLE
@@ -802,23 +855,24 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
         texts: text_tx,
         echo,
         stop,
-        // Sin dispositivo elegido la voz suena por los altavoces y el micro
-        // la recoge; con uno elegido (el caso VB-CABLE) el usuario ya ha
-        // decidido su enrutado y suprimir seria callar habla legitima.
-        suppress_while_on_air: config.speak.output_device_id.is_none(),
     })
 }
 
 fn stop_internal(app: &AppHandle, state: &AppState) {
     state.running.store(false, Ordering::SeqCst);
-    // La voz primero y sin esperar: que se calle mientras las sesiones se
-    // recogen, no despues.
-    if let Some(stop) = state.speech_stop.lock().unwrap().take() {
-        stop.store(true, Ordering::Relaxed);
-    }
+    // Las sesiones primero, y la voz DESPUES. Al reves, la ultima frase se
+    // perdia siempre: entre que se dice y que llega traducida a la voz pasa
+    // mas de un segundo (ASR + cierre de frase + NLLB), asi que callar antes
+    // de recoger las sesiones garantizaba tirarla.
     let sessions = std::mem::take(&mut *state.sessions.lock().unwrap());
     for session in sessions {
         session.join();
+    }
+    // Ya no entra audio nuevo: lo que quede en la cola de voz se dice y la
+    // bomba termina sola al cerrarse el canal de textos. El asidero se suelta
+    // igualmente, por si el usuario para con la cola muy larga.
+    if let Some(stop) = state.speech_stop.lock().unwrap().take() {
+        stop.store(true, Ordering::Relaxed);
     }
     // Lo que quedara a medias se cierra como una linea mas.
     let closed = state.transcript.lock().unwrap().close_all(0);

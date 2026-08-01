@@ -218,8 +218,12 @@ pub struct TranslationPump {
     /// Por fuente: id de parrafo, instante de inicio y frases a medias.
     state: std::collections::HashMap<asr_audio::Source, SourceState>,
     next_paragraph: u64,
-    src: String,
-    tgt: String,
+    /// Direccion para lo que suena en la sala (el audio del sistema).
+    system_pair: (String, String),
+    /// Direccion para lo que digo al microfono. En el caso tipico es la
+    /// invertida de la sala (a los demas se les lee en mi idioma, a mi se me
+    /// traduce al suyo), pero cada par se elige por separado.
+    mic_pair: (String, String),
     /// Memoria de lo que la voz sintetica acaba de decir. Solo cuando la voz
     /// esta activada; ver [`crate::speak::EchoRegistry`].
     echo: Option<std::sync::Arc<crate::speak::EchoRegistry>>,
@@ -233,28 +237,29 @@ struct SourceState {
 }
 
 impl TranslationPump {
-    /// `src_locale` y `tgt_locale` son locales del ASR (`es-ES`), no codigos
-    /// FLORES; la conversion se hace aqui.
+    /// `sala` y `micro` son pares `(origen, destino)` en locales del ASR
+    /// (`es-ES`), no codigos FLORES; la conversion se hace aqui. Cada fuente
+    /// traduce en su sentido: en el caso tipico el micro es el espejo de la
+    /// sala, pero los pares llegan ya resueltos por la configuracion.
     pub fn new(
         translator: Box<dyn Translator>,
-        src_locale: &str,
-        tgt_locale: &str,
+        sala: (&str, &str),
+        micro: (&str, &str),
     ) -> Result<Self> {
-        let src = flores_code(src_locale).ok_or_else(|| {
-            EngineError::Spawn(format!(
-                "no se puede traducir desde {src_locale}: elige un idioma concreto \
-                 en vez de la deteccion automatica, el traductor necesita saber cual es"
-            ))
-        })?;
-        let tgt = flores_code(tgt_locale)
-            .ok_or_else(|| EngineError::Spawn(format!("idioma destino desconocido: {tgt_locale}")))?;
-
+        let code = |locale: &str, papel: &str| {
+            flores_code(locale).map(str::to_string).ok_or_else(|| {
+                EngineError::Spawn(format!(
+                    "no se puede traducir {papel} {locale}: elige un idioma concreto \
+                     en vez de la deteccion automatica, el traductor necesita saberlo"
+                ))
+            })
+        };
         Ok(Self {
             translator,
             state: std::collections::HashMap::new(),
             next_paragraph: 1,
-            src: src.to_string(),
-            tgt: tgt.to_string(),
+            system_pair: (code(sala.0, "la sala en")?, code(sala.1, "la sala a")?),
+            mic_pair: (code(micro.0, "el micro en")?, code(micro.1, "el micro a")?),
             echo: None,
         })
     }
@@ -338,7 +343,13 @@ impl TranslationPump {
                     continue;
                 }
             }
-            match self.translator.translate(&sentence, &self.src, &self.tgt) {
+            // Cada fuente traduce en su sentido: lo del sistema hacia mi
+            // idioma, lo del microfono hacia el de la reunion.
+            let (src, tgt) = match source {
+                asr_audio::Source::System => &self.system_pair,
+                asr_audio::Source::Mic => &self.mic_pair,
+            };
+            match self.translator.translate(&sentence, src, tgt) {
                 Ok(translated) => out.push(TranslatedLine {
                     source,
                     paragraph,
@@ -652,5 +663,96 @@ mod tests {
         assert_eq!(flores_code("pt-BR"), flores_code("pt-PT"));
         // Salvo el chino, que cambia de escritura.
         assert_ne!(flores_code("zh-CN"), flores_code("zh-TW"));
+    }
+
+    /// Traductor de mentira que devuelve la direccion que le pidieron, para
+    /// poder comprobar que cada fuente traduce en su sentido.
+    struct EchoDirection;
+
+    impl Translator for EchoDirection {
+        fn translate(&mut self, _text: &str, src: &str, tgt: &str) -> Result<String> {
+            Ok(format!("{src}->{tgt}"))
+        }
+        fn shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn delta(source: asr_audio::Source, text: &str) -> crate::session::SessionEvent {
+        crate::session::SessionEvent::Delta {
+            source,
+            at_ms: 0,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn la_sala_traduce_en_su_sentido() {
+        // Sala en ingles que leo en espanol.
+        let mut pump = TranslationPump::new(
+            Box::new(EchoDirection),
+            ("en-US", "es-ES"),
+            ("es-ES", "en-US"),
+        )
+        .expect("arranca");
+        let lines = pump.handle(&delta(asr_audio::Source::System, "One sentence. "));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].translated, "eng_Latn->spa_Latn");
+    }
+
+    #[test]
+    fn el_microfono_traduce_en_el_suyo() {
+        // Y lo que digo yo va en el sentido contrario: espanol -> ingles,
+        // que es lo que la voz sintetica pronunciara a la sala.
+        let mut pump = TranslationPump::new(
+            Box::new(EchoDirection),
+            ("en-US", "es-ES"),
+            ("es-ES", "en-US"),
+        )
+        .expect("arranca");
+        let lines = pump.handle(&delta(asr_audio::Source::Mic, "Una frase. "));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].translated, "spa_Latn->eng_Latn");
+    }
+
+    #[test]
+    fn los_pares_pueden_no_ser_espejo() {
+        // Los cuatro huecos son independientes: sala en ingles leida en
+        // espanol, micro en frances hablado en aleman.
+        let mut pump = TranslationPump::new(
+            Box::new(EchoDirection),
+            ("en-US", "es-ES"),
+            ("fr-FR", "de-DE"),
+        )
+        .expect("arranca");
+        let lines = pump.handle(&delta(asr_audio::Source::Mic, "Une phrase. "));
+        assert_eq!(lines[0].translated, "fra_Latn->deu_Latn");
+    }
+
+    #[test]
+    fn el_eco_se_reconoce_tambien_por_el_microfono() {
+        // Si la voz sintetica suena por los altavoces, el microfono puede
+        // recogerla; si el texto casa, se marca en vez de re-traducirse.
+        // (La defensa de verdad contra el bucle es la guardia de "voz en el
+        // aire" de la capa de arriba: entre idiomas distintos el ASR no
+        // devuelve el texto literal y este casado no basta.)
+        let registry = std::sync::Arc::new(crate::speak::EchoRegistry::new());
+        registry.record(
+            "the virtual microphone is now working fine",
+            std::time::Duration::from_secs(30),
+        );
+        let mut pump = TranslationPump::new(
+            Box::new(EchoDirection),
+            ("en-US", "es-ES"),
+            ("es-ES", "en-US"),
+        )
+        .expect("arranca")
+        .with_echo_registry(registry);
+        let lines = pump.handle(&delta(
+            asr_audio::Source::Mic,
+            "The virtual microphone is now working fine. ",
+        ));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].echo, "deberia marcarse como eco, no traducirse");
     }
 }

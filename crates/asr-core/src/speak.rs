@@ -179,6 +179,19 @@ impl EchoRegistry {
         });
     }
 
+    /// ¿Esta la voz sintetica sonando (o acabada de sonar)? Cada entrada se
+    /// registra con una validez que cubre cola + duracion + margen, asi que
+    /// "hay alguna viva" equivale a "la voz esta o estuvo hace nada en el
+    /// aire". Es la base de la guardia anti-bucle: el casado por texto no
+    /// funciona entre idiomas (el ASR del micro, clavado a mi idioma, no
+    /// devuelve literal el audio en el de la sala), pero el tiempo si.
+    pub fn voice_on_air(&self) -> bool {
+        let mut spoken = self.spoken.lock().unwrap();
+        let now = Instant::now();
+        spoken.retain(|s| s.expires > now);
+        !spoken.is_empty()
+    }
+
     /// ¿Es esto un eco de algo que la voz sintetica acaba de decir?
     pub fn matches(&self, heard: &str) -> bool {
         let heard = Self::tokens(heard);

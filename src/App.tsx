@@ -20,6 +20,7 @@ import {
   copyText,
   formatClock,
   groupByParagraph,
+  languageName,
 } from "./tauri";
 
 type Partials = Partial<Record<Source, string>>;
@@ -330,6 +331,10 @@ export default function App() {
           splitPct={splitPct}
           setSplitPct={setSplitPct}
           translateOn={config.translate}
+          salaName={languageName(config.language)}
+          salaTargetName={languageName(config.target_language)}
+          micName={languageName(config.mic_language || config.target_language)}
+          micTargetName={languageName(config.mic_target_language || config.language)}
           onCopyAll={copyAll}
           onExport={doExport}
           onClear={async () => {
@@ -468,20 +473,6 @@ function ConfigPane({
       <section className="panel">
         <h2>Transcripcion</h2>
         <label className="field">
-          <span>Idioma hablado</span>
-          <select
-            disabled={running}
-            value={config.language}
-            onChange={(e) => patch({ language: e.target.value })}
-          >
-            {LANGUAGES.map(([code, name]) => (
-              <option key={code} value={code}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
           <span>Latencia</span>
           <select
             disabled={running}
@@ -546,38 +537,109 @@ function ConfigPane({
       </section>
 
       <section className="panel">
-        <h2>Traduccion</h2>
+        <h2>Idiomas</h2>
+        <div className="lang-block">
+          <h3 className="pane-title">Sala (el audio del sistema)</h3>
+          <div className="lang-pair">
+            <select
+              disabled={running}
+              value={config.language}
+              onChange={(e) => patch({ language: e.target.value })}
+            >
+              {LANGUAGES.map(([code, name]) => (
+                <option key={code} value={code}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <span className="arrow">→</span>
+            <select
+              disabled={running || !config.translate}
+              value={config.target_language}
+              onChange={(e) => patch({ target_language: e.target.value })}
+            >
+              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+                <option key={code} value={code}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="note">
+            En que hablan los demas, y en que lo lees tu.
+          </p>
+        </div>
+
+        <div className="lang-block">
+          <h3 className="pane-title">Microfono (lo que dices tu)</h3>
+          <div className="lang-pair">
+            <select
+              disabled={running || !config.translate}
+              value={config.mic_language || config.target_language}
+              onChange={(e) => patch({ mic_language: e.target.value })}
+            >
+              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+                <option key={code} value={code}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <span className="arrow">→</span>
+            <select
+              disabled={running || !config.translate}
+              value={
+                config.mic_target_language ||
+                (config.language === "auto" ? "" : config.language)
+              }
+              onChange={(e) => patch({ mic_target_language: e.target.value })}
+            >
+              {config.language === "auto" && !config.mic_target_language && (
+                <option value="">(elige la sala primero)</option>
+              )}
+              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+                <option key={code} value={code}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="note">
+            En que hablas tu, y en que te oyen. Si la voz sintetica esta
+            activada, pronuncia el idioma de la derecha. Sin tocar nada, el
+            microfono es el espejo de la sala: hablas en el idioma en que
+            lees, y se te traduce al de la sala.
+          </p>
+        </div>
+
         <label className="row">
           <input
             type="checkbox"
             checked={config.translate}
             disabled={running}
-            onChange={(e) => patch({ translate: e.target.checked })}
+            onChange={(e) =>
+              // Sin traduccion la voz no tiene nada que pronunciar: se apaga
+              // a la vez, y su seccion desaparece. Si no, quedaria activada
+              // pero invisible, y el arranque fallaria con un error que no
+              // se puede arreglar desde esta pantalla.
+              patch(
+                e.target.checked
+                  ? { translate: true }
+                  : { translate: false, speak: { ...config.speak, enabled: false } }
+              )
+            }
           />
           <span>Traducir en paralelo</span>
         </label>
-        <label className="field">
-          <span>Traducir a</span>
-          <select
-            disabled={running || !config.translate}
-            value={config.target_language}
-            onChange={(e) => patch({ target_language: e.target.value })}
-          >
-            {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
-              <option key={code} value={code}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
         <p className="note">
-          El modelo de voz no traduce: lo hace NLLB-200 despues, un parrafo
-          entero cada vez. Los fallos del reconocimiento se arrastran a la
-          traduccion.
+          Sin traduccion solo se transcribe, todo en el idioma de la sala. El
+          modelo de voz no traduce: lo hace NLLB-200 despues, frase a frase.
+          Los fallos del reconocimiento se arrastran a la traduccion.
         </p>
       </section>
 
-      <SpeakPane config={config} outputs={outputs} running={running} patch={patch} />
+      {config.translate && (
+        <SpeakPane config={config} outputs={outputs} running={running} patch={patch} />
+      )}
     </div>
   );
 }
@@ -618,8 +680,7 @@ function SpeakPane({
         Lo que dices por el microfono, ya traducido, sale hablado por el
         dispositivo elegido. Con VB-CABLE como dispositivo y{" "}
         <code>CABLE Output</code> como microfono de la reunion, los demas te
-        oyen en su idioma. Necesita <em>Traducir en paralelo</em> y{" "}
-        <em>Mi microfono</em> activados.
+        oyen en su idioma. Necesita <em>Mi microfono</em> activado en Fuentes.
       </p>
 
       <label className="field">
@@ -767,6 +828,10 @@ function TranscriptTab({
   splitPct,
   setSplitPct,
   translateOn,
+  salaName,
+  salaTargetName,
+  micName,
+  micTargetName,
   onCopyAll,
   onExport,
   onClear,
@@ -781,6 +846,10 @@ function TranscriptTab({
   splitPct: number;
   setSplitPct: (n: number) => void;
   translateOn: boolean;
+  salaName: string;
+  salaTargetName: string;
+  micName: string;
+  micTargetName: string;
   onCopyAll: (what: "original" | "translated" | "both") => void;
   onExport: (f: ExportFormat) => void;
   onClear: () => void;
@@ -820,7 +889,17 @@ function TranscriptTab({
         </div>
       </div>
 
-      {isSplit ? (
+      {split === "meeting" ? (
+        <MeetingView
+          translations={translations}
+          partials={partials}
+          salaName={salaName}
+          salaTargetName={salaTargetName}
+          micName={micName}
+          micTargetName={micTargetName}
+          onCopy={onCopyLine}
+        />
+      ) : isSplit ? (
         <div className={`panes ${split}`}>
           <section className="pane" style={{ flexBasis: `${splitPct}%` }}>
             <h3 className="pane-title">Original</h3>
@@ -844,6 +923,125 @@ function TranscriptTab({
         />
       )}
     </>
+  );
+}
+
+/// La vista de reunion bilingue: cuatro cajas. Los demas arriba (2/3) y yo
+/// abajo (1/3), con cada IDIOMA en su columna — a la izquierda el de la
+/// reunion, a la derecha el mio. Las direcciones quedan invertidas entre
+/// filas a proposito, porque asi fluye la traduccion: lo de arriba va de
+/// izquierda a derecha (les leo) y lo de abajo de derecha a izquierda (mi
+/// voz les habla).
+function MeetingView({
+  translations,
+  partials,
+  salaName,
+  salaTargetName,
+  micName,
+  micTargetName,
+  onCopy,
+}: {
+  translations: TranslatedLine[];
+  partials: Partials;
+  salaName: string;
+  salaTargetName: string;
+  micName: string;
+  micTargetName: string;
+  onCopy: (t: string) => void;
+}) {
+  const others = groupByParagraph(translations.filter((l) => l.source === "system"));
+  const mine = groupByParagraph(translations.filter((l) => l.source === "mic"));
+
+  const refOthersOriginal = useAutoScroll([translations, partials.system]);
+  const refOthersTranslated = useAutoScroll([translations]);
+  const refMineTranslated = useAutoScroll([translations]);
+  const refMineOriginal = useAutoScroll([translations, partials.mic]);
+
+  return (
+    <div className="meeting-grid">
+      <section className="pane">
+        <h3 className="pane-title">Los demas — {salaName}</h3>
+        <div className="scroll transcript">
+          {others.length === 0 && !partials.system && (
+            <p className="muted">Nada todavia. Lo que suene en la reunion aparece aqui.</p>
+          )}
+          {others.map((line, i) => (
+            <Paragraph
+              key={i}
+              time={formatClock(line.at_ms)}
+              text={line.original}
+              echo={line.echo}
+              onCopy={onCopy}
+            />
+          ))}
+          {partials.system && <p className="line system partial">{partials.system}</p>}
+          <div ref={refOthersOriginal} />
+        </div>
+      </section>
+
+      <section className="pane">
+        <h3 className="pane-title">Los demas — {salaTargetName}</h3>
+        <div className="scroll transcript">
+          {/* Los ecos no llevan traduccion: son mi propia voz, ya en el
+              idioma de la reunion, y quedan marcados en la caja original. */}
+          {others
+            .filter((line) => !line.echo)
+            .map((line, i) => (
+              <Paragraph
+                key={i}
+                time={formatClock(line.at_ms)}
+                text={line.translated}
+                translated
+                onCopy={onCopy}
+              />
+            ))}
+          <div ref={refOthersTranslated} />
+        </div>
+      </section>
+
+      <section className="pane">
+        <h3 className="pane-title">Mi voz les dice — {micTargetName}</h3>
+        <div className="scroll transcript">
+          {/* Los ecos no se pronuncian, asi que aqui tampoco se muestran:
+              esta caja es "lo que la voz va a decir", y mentiria. */}
+          {mine
+            .filter((line) => !line.echo)
+            .map((line, i) => (
+              <Paragraph
+                key={i}
+                time={formatClock(line.at_ms)}
+                text={line.translated}
+                translated
+                onCopy={onCopy}
+              />
+            ))}
+          <div ref={refMineTranslated} />
+        </div>
+      </section>
+
+      <section className="pane">
+        <h3 className="pane-title">Yo — {micName}</h3>
+        <div className="scroll transcript">
+          {mine.length === 0 && !partials.mic && (
+            <p className="muted">Habla al microfono y tu texto aparece aqui.</p>
+          )}
+          {/* echo marca la propia voz sintetica captada por el micro: va en
+              el idioma de la sala, no en el mio, y sin la marca pareceria
+              que lo dije yo. */}
+          {mine.map((line, i) => (
+            <Paragraph
+              key={i}
+              time={formatClock(line.at_ms)}
+              text={line.original}
+              echo={line.echo}
+              onCopy={onCopy}
+            />
+          ))}
+          {partials.mic && <p className="line mic partial">{partials.mic}</p>}
+          <div ref={refMineOriginal} />
+        </div>
+      </section>
+    </div>
   );
 }
 

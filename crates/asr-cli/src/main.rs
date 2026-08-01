@@ -363,11 +363,12 @@ fn run(args: RunArgs) -> Result<()> {
             let mt_sidecar = MtSidecar::spawn(&mt)?;
             let device = mt_sidecar.wait_ready(Duration::from_secs(300))?;
             println!("traductor listo en {device}, destino {target}");
-            Some(TranslationPump::new(
-                Box::new(mt_sidecar),
-                &sidecar.language,
-                target,
-            )?)
+            // La bomba lleva un par (origen, destino) por fuente. El CLI
+            // captura una sola, y el usuario pide "transcribe --language X y
+            // traduce a Y": ese es el par de su fuente; el de la otra no se
+            // usa, asi que se pasa el mismo.
+            let pair = (sidecar.language.as_str(), target);
+            Some(TranslationPump::new(Box::new(mt_sidecar), pair, pair)?)
         }
     };
 

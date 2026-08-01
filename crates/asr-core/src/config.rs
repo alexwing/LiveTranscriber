@@ -21,12 +21,22 @@ pub struct AppConfig {
 
     /// Traducir en paralelo a la transcripcion.
     pub translate: bool,
-    /// Locale destino (`en-US`, `de-DE`, ...). El origen es [`Self::language`],
-    /// que por eso no puede ser `auto` si se traduce: NLLB necesita saberlo.
+    /// A que se traduce lo de la **sala** (lo que yo leo). El nombre del
+    /// campo viene de cuando solo habia una direccion de traduccion; se
+    /// mantiene para que las configuraciones existentes sigan cargando.
     pub target_language: String,
 
-    /// Locale (`es-ES`, `en-US`, ...) o `auto`.
+    /// Idioma de la **sala** (`en-US`, ...) o `auto`: lo que suena en el
+    /// sistema. Con traduccion no puede ser `auto`: NLLB necesita saberlo.
     pub language: String,
+
+    /// Idioma del **microfono**: el que hablo yo. Vacio = el mismo al que se
+    /// traduce la sala ([`Self::target_language`]), que es lo normal: leo y
+    /// hablo en mi idioma. Se persiste solo si el usuario lo cambia.
+    pub mic_language: String,
+    /// A que se traduce el microfono — y por tanto **lo que pronuncia la voz
+    /// sintetica**. Vacio = el idioma de la sala: les hablo en el suyo.
+    pub mic_target_language: String,
     /// 0, 3, 6 o 13.
     pub lookahead: u8,
     pub dtype: String,
@@ -215,6 +225,8 @@ impl Default for AppConfig {
             translate: false,
             target_language: "en-US".to_string(),
             language: "auto".to_string(),
+            mic_language: String::new(),
+            mic_target_language: String::new(),
             lookahead: 3,
             dtype: "bfloat16".to_string(),
             capture_system: true,
@@ -342,6 +354,30 @@ impl AppConfig {
         }
     }
 
+    /// Idioma en que transcribir **el microfono**. Si no se ha elegido uno,
+    /// con traduccion cae al idioma en que leo la sala (en una reunion en
+    /// ingles yo sigo hablando espanol) y sin traduccion se transcribe igual
+    /// que la sala, como siempre.
+    pub fn mic_asr_language(&self) -> String {
+        if !self.mic_language.is_empty() {
+            return self.mic_language.clone();
+        }
+        if self.translate {
+            self.target_language.clone()
+        } else {
+            self.language.clone()
+        }
+    }
+
+    /// Idioma que pronuncia la **voz sintetica**: aquel al que se traduce el
+    /// microfono. Si no se ha elegido uno, el de la sala.
+    pub fn voice_language(&self) -> String {
+        if !self.mic_target_language.is_empty() {
+            return self.mic_target_language.clone();
+        }
+        self.language.clone()
+    }
+
     pub fn tts(&self) -> crate::speak::TtsConfig {
         crate::speak::TtsConfig {
             python: self.speak.python.clone(),
@@ -349,9 +385,9 @@ impl AppConfig {
             engine: self.speak.engine.clone(),
             voice_wav: self.speak.voice_wav.clone(),
             kokoro_voice: self.speak.kokoro_voice.clone(),
-            // Se habla en el idioma destino de la traduccion; precalentarlo
-            // mueve la carga perezosa de kokoro al arranque.
-            warm_lang: crate::speak::tts_lang_code(&self.target_language)
+            // La voz pronuncia el idioma al que se traduce el microfono;
+            // precalentarlo mueve la carga perezosa de kokoro al arranque.
+            warm_lang: crate::speak::tts_lang_code(&self.voice_language())
                 .map(str::to_string),
             hf_home: self.hf_home.clone(),
         }
@@ -487,6 +523,37 @@ mod tests {
             cfg.output_dir_absolute(),
             PathBuf::from("D:\\mis transcripciones")
         );
+    }
+
+    #[test]
+    fn el_micro_hereda_el_espejo_de_la_sala_si_no_se_elige() {
+        // Sala en ingles traducida al espanol: sin tocar nada, el micro se
+        // transcribe en espanol y su traduccion (la voz) sale en ingles.
+        let cfg: AppConfig = toml::from_str(
+            "language = \"en-US\"\ntarget_language = \"es-ES\"\ntranslate = true\n",
+        )
+        .expect("parsea");
+        assert_eq!(cfg.mic_asr_language(), "es-ES");
+        assert_eq!(cfg.voice_language(), "en-US");
+    }
+
+    #[test]
+    fn el_micro_elegido_a_mano_manda_sobre_el_espejo() {
+        let cfg: AppConfig = toml::from_str(
+            "language = \"en-US\"\ntarget_language = \"es-ES\"\ntranslate = true\n\
+             mic_language = \"fr-FR\"\nmic_target_language = \"de-DE\"\n",
+        )
+        .expect("parsea");
+        assert_eq!(cfg.mic_asr_language(), "fr-FR");
+        assert_eq!(cfg.voice_language(), "de-DE");
+    }
+
+    #[test]
+    fn sin_traduccion_el_micro_se_transcribe_como_la_sala() {
+        // El comportamiento de siempre: un solo idioma para todo.
+        let cfg: AppConfig =
+            toml::from_str("language = \"es-ES\"\ntranslate = false\n").expect("parsea");
+        assert_eq!(cfg.mic_asr_language(), "es-ES");
     }
 
     #[test]

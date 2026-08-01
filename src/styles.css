@@ -194,6 +194,47 @@ button.stop {
   flex-wrap: wrap;
 }
 
+/* Panel de idiomas: un par "de -> a" por fuente (sala y microfono). */
+.lang-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.lang-pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lang-pair select {
+  flex: 1;
+  min-width: 0;
+}
+
+.lang-pair .arrow {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+/* Vista de reunion: los demas arriba (2/3), yo abajo (1/3), un idioma por
+   columna. La fila de abajo se separa con la misma linea que divide paneles. */
+.meeting-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 2fr 1fr;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.meeting-grid .pane {
+  min-height: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
 .segmented {
   display: flex;
 }

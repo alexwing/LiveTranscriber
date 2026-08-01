@@ -16,6 +16,10 @@ export interface AppConfig {
   capture_mic: boolean;
   system_device_id: string | null;
   mic_device_id: string | null;
+  /** Idioma del microfono. "" = el mismo al que se traduce la sala. */
+  mic_language: string;
+  /** A que se traduce el micro (= lo que pronuncia la voz). "" = el de la sala. */
+  mic_target_language: string;
   gate_drop_db: number;
   gate_floor_dbfs: number;
   gate_hold_secs: number;
@@ -106,7 +110,8 @@ export type Split =
   | "split-v"
   | "split-h"
   | "only-original"
-  | "only-translated";
+  | "only-translated"
+  | "meeting";
 
 export const SPLITS: Array<[Split, string, string]> = [
   ["combined", "≡", "Combinado: la traduccion debajo de cada parrafo"],
@@ -114,7 +119,14 @@ export const SPLITS: Array<[Split, string, string]> = [
   ["split-h", "⬍", "Dividido horizontal: uno encima del otro"],
   ["only-original", "O", "Solo el original"],
   ["only-translated", "T", "Solo la traduccion"],
+  ["meeting", "⊞", "Reunion: los demas arriba, yo abajo, un idioma por columna"],
 ];
+
+/** Nombre legible de un idioma a partir de su locale. */
+export function languageName(code: string): string {
+  const found = LANGUAGES.find(([c]) => c === code);
+  return found ? found[1] : code;
+}
 
 /** Eventos que llegan por `session-event`. */
 export type SessionEvent =

@@ -6,14 +6,29 @@ python = 'E:\projects\nemotron-3.5-asr-streaming-0.6b\.venv\Scripts\python.exe'
 script = 'sidecar/asr_server.py'
 mt_script = 'sidecar/mt_server.py'
 
-# Traduccion en paralelo, con NLLB-200 en un segundo proceso.
-# El idioma de origen es `language`, que por eso NO puede ser "auto" si esto
-# esta activado: NLLB necesita saber desde donde traduce.
+# Traduccion en paralelo, con NLLB-200 en un segundo proceso. Cada fuente
+# lleva su par de idiomas "de -> a":
+#   sala      language        -> target_language   (lo que dicen, en que lo leo)
+#   microfono mic_language    -> mic_target_language (lo que digo, en que me oyen;
+#                                lo de la derecha es lo que pronuncia la voz)
+# Sin tocar los del micro, es el espejo de la sala: hablas en el idioma en el
+# que lees y se te traduce al de la sala. Con esto activado `language` NO
+# puede ser "auto": NLLB necesita saberlo.
 translate = false
+
+# A que se traduce la SALA: el idioma en que lees a los demas. El nombre del
+# campo viene de cuando solo habia una direccion; se mantiene para que las
+# configuraciones existentes sigan cargando.
 target_language = "en-US"
 
-# Locale (es-ES, en-US, fr-FR...) o "auto" para que lo detecte el modelo.
+# Idioma de la SALA: lo que suena en el sistema. Locale concreto
+# (es-ES, en-US, fr-FR...) o "auto" para que lo detecte el modelo (solo
+# valido sin traduccion).
 language = "auto"
+
+# El par del MICROFONO, solo si quieres algo distinto del espejo de la sala.
+# mic_language = "es-ES"
+# mic_target_language = "en-US"
 
 # Solo 0, 3, 6 o 13. Son los unicos que acepta el modelo.
 #   0  -> 80 ms   minima latencia, mas errores, ~1 flujo en una 3060

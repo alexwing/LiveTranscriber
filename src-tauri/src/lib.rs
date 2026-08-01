@@ -445,6 +445,33 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
         return Err("no hay ninguna fuente activada".to_string().into());
     }
 
+    // Las validaciones de idioma van ANTES de montar nada, para que el error
+    // sea siempre el claro: sin esto, con el idioma en "auto" y la voz
+    // activada el primero en quejarse era el sintetizador, con un mensaje
+    // que no apuntaba a la causa.
+    if config.translate {
+        if config.language == "auto" {
+            state.running.store(false, Ordering::SeqCst);
+            return Err("Para traducir hay que elegir un idioma concreto para la \
+                        sala en vez de la deteccion automatica: el traductor \
+                        necesita saber desde que idioma parte."
+                .to_string()
+                .into());
+        }
+        // El idioma del micro pasa a ser idioma de transcripcion, no solo de
+        // traduccion: si el TOML trae uno que el modelo no transcribe, el
+        // arranque pasaria y cada frase del micro moriria una a una.
+        let mic_lang = config.mic_asr_language();
+        if config.capture_mic && asr_core::flores_code(&mic_lang).is_none() {
+            state.running.store(false, Ordering::SeqCst);
+            return Err(format!(
+                "el idioma del microfono ({mic_lang}) no es un locale valido: \
+                 eligelo en la configuracion"
+            )
+            .into());
+        }
+    }
+
     // La voz sintetica se monta la primera: es opcional, pero si esta
     // activada y no puede arrancar (falta el WAV de la voz, el venv, el
     // idioma no tiene sintetizador), mejor un error claro ahora que una
@@ -497,7 +524,15 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
             paragraph_max_secs: config.paragraph_max_secs,
             normalize_gain: config.normalize_gain,
         };
-        match Session::start(session_cfg, &sidecar, tx.clone()) {
+        // Cada fuente transcribe en su idioma: la sala en el suyo y el
+        // microfono en el mio (yo sigo hablando espanol aunque la sala vaya
+        // en ingles). Es lo que permite que cada una se traduzca luego en su
+        // sentido.
+        let mut source_sidecar = sidecar.clone();
+        if source == Source::Mic {
+            source_sidecar.language = config.mic_asr_language();
+        }
+        match Session::start(session_cfg, &source_sidecar, tx.clone()) {
             Ok(session) => started.push(session),
             Err(e) => {
                 // Si una fuente falla, no dejamos la otra a medias.
@@ -524,6 +559,13 @@ struct SpeechWiring {
     texts: std::sync::mpsc::Sender<String>,
     echo: Option<Arc<EchoRegistry>>,
     stop: Arc<AtomicBool>,
+    /// Con la voz sonando por los altavoces (sin dispositivo elegido), el
+    /// microfono la recoge, y el casado por texto no la reconoce: el ASR del
+    /// micro va clavado a mi idioma y no devuelve literal el audio en el de
+    /// la sala. Sin esta guardia, eso se traduce y se vuelve a hablar: un
+    /// bucle hablandose a si mismo. Mientras la voz este en el aire, lo que
+    /// entre por el micro se transcribe pero no se re-habla.
+    suppress_while_on_air: bool,
 }
 
 /// Levanta el traductor y su hilo. Devuelve por donde mandarle los eventos.
@@ -560,8 +602,8 @@ fn start_translation(
 
     let mut pump = TranslationPump::new(
         Box::new(sidecar),
-        &config.language,
-        &config.target_language,
+        (&config.language, &config.target_language),
+        (&config.mic_asr_language(), &config.voice_language()),
     )?;
     if let Some(echo) = speech.as_ref().and_then(|s| s.echo.clone()) {
         pump = pump.with_echo_registry(echo);
@@ -579,7 +621,21 @@ fn start_translation(
                     // Y los ecos de la propia voz sintetica, tampoco.
                     if let Some(speech) = &speech {
                         if line.source == Source::Mic && !line.echo {
-                            let _ = speech.texts.send(line.translated.clone());
+                            let on_air = speech.suppress_while_on_air
+                                && speech
+                                    .echo
+                                    .as_ref()
+                                    .is_some_and(|registry| registry.voice_on_air());
+                            if on_air {
+                                // Ver el comentario de SpeechWiring: por los
+                                // altavoces, lo captado mientras la voz suena
+                                // es casi seguro la propia voz.
+                                tracing::info!(
+                                    "micro captado con la voz en el aire; no se re-habla"
+                                );
+                            } else {
+                                let _ = speech.texts.send(line.translated.clone());
+                            }
                         }
                     }
                     transcript.lock().unwrap().push_translation(line.clone());
@@ -606,20 +662,21 @@ fn start_translation(
 /// soltar la cola de audio el hilo de render termina de reproducir y se va.
 /// Cada eslabon cae cuando cae el anterior, igual que el resto de la app.
 fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, CmdError> {
-    let lang = asr_core::tts_lang_code(&config.target_language).ok_or_else(|| {
+    // La voz pronuncia el idioma al que se traduce el microfono: dice a los
+    // demas, en su idioma, lo que yo hablo en el mio.
+    let voice_language = config.voice_language();
+    let lang = asr_core::tts_lang_code(&voice_language).ok_or_else(|| {
         format!(
-            "no hay sintetizador para {}: chatterbox habla 23 idiomas y ese \
-             no esta entre ellos",
-            config.target_language
+            "no hay sintetizador para {voice_language}: chatterbox habla 23 \
+             idiomas y ese no esta entre ellos"
         )
     })?;
     // Kokoro cubre menos idiomas que chatterbox; sin esto el arranque pasa
     // y cada frase de la reunion falla una a una.
     if config.speak.engine == "kokoro" && !asr_core::speak::kokoro_supports(lang) {
         return Err(format!(
-            "kokoro no tiene voces para {}: cambia al motor chatterbox o \
-             elige otro idioma destino",
-            config.target_language
+            "kokoro no tiene voces para {voice_language}: cambia al motor \
+             chatterbox o elige otro idioma para la traduccion del micro"
         )
         .into());
     }
@@ -745,6 +802,10 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
         texts: text_tx,
         echo,
         stop,
+        // Sin dispositivo elegido la voz suena por los altavoces y el micro
+        // la recoge; con uno elegido (el caso VB-CABLE) el usuario ya ha
+        // decidido su enrutado y suprimir seria callar habla legitima.
+        suppress_while_on_air: config.speak.output_device_id.is_none(),
     })
 }
 

@@ -84,13 +84,13 @@ overlay_enabled = false
 output_dir = 'C:\Users\TuUsuario\Documents\LiveTranscriber'
 
 # Base name of the file. The final name carries the date in front:
-#   2026_07_28_transcripcion.txt
-#   2026_07_28_transcripcion.srt
-#   2026_07_28_transcripcion_traducida.srt   (translation only)
-#   2026_07_28_transcripcion_bilingue.txt    (original and translation)
+#   2026_07_28_transcript.txt
+#   2026_07_28_transcript.srt
+#   2026_07_28_transcript_translated.srt   (translation only)
+#   2026_07_28_transcript_bilingual.txt    (original and translation)
 # If one with that name exists, _2, _3... is added instead of overwriting it.
 # The characters Windows does not accept (\ / : * ? " < > |) are replaced with _.
-output_name = "transcripcion"
+output_name = "transcript"
 
 # ─── Synthetic voice ─────────────────────────────────────────────────────
 # Speak the translation of what you say into the microphone, in your cloned voice

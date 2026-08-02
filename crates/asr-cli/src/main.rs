@@ -18,7 +18,7 @@ use asr_core::{AppConfig, Session, SessionConfig, SessionEvent, Transcript};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "asr-cli", about = "Captura y transcripcion sin interfaz")]
+#[command(name = "asr-cli", about = "Headless capture and transcription")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -26,9 +26,9 @@ struct Cli {
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Which {
-    /// Todo lo que suena en el sistema (loopback).
+    /// Everything playing on the system (loopback).
     System,
-    /// El microfono.
+    /// The microphone.
     Mic,
 }
 
@@ -50,11 +50,11 @@ impl Which {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Lista dispositivos de entrada y salida.
+    /// List input and output devices.
     Devices,
 
-    /// Captura y muestra el nivel, sin cargar el modelo. Sirve para confirmar
-    /// que el loopback entrega audio antes de meter la GPU de por medio.
+    /// Capture and show the level, without loading the model. Useful to confirm
+    /// that loopback is delivering audio before bringing the GPU into it.
     Level {
         #[arg(long, value_enum, default_value = "system")]
         from: Which,
@@ -62,12 +62,12 @@ enum Command {
         device_id: Option<String>,
         #[arg(long, default_value_t = 10)]
         seconds: u64,
-        /// Captura solo el audio de este proceso (loopback por PID).
+        /// Capture only this process's audio (loopback by PID).
         #[arg(long)]
         pid: Option<u32>,
     },
 
-    /// Transcribe de verdad, arrancando el sidecar de Python.
+    /// Transcribe for real, starting the Python sidecar.
     Run {
         #[arg(long, value_enum, default_value = "system")]
         from: Which,
@@ -81,54 +81,54 @@ enum Command {
         language: String,
         #[arg(long, default_value_t = 3)]
         lookahead: u8,
-        /// Interprete del venv con torch y transformers.
+        /// Interpreter of the venv with torch and transformers.
         #[arg(long)]
         python: Option<PathBuf>,
-        /// Ruta a asr_server.py.
+        /// Path to asr_server.py.
         #[arg(long, default_value = "sidecar/asr_server.py")]
         script: PathBuf,
-        /// Guarda la transcripcion en este .txt al terminar.
+        /// Save the transcript to this .txt when it finishes.
         #[arg(long)]
         save_txt: Option<PathBuf>,
-        /// Guarda la transcripcion en este .srt al terminar.
+        /// Save the transcript to this .srt when it finishes.
         #[arg(long)]
         save_srt: Option<PathBuf>,
-        /// Traducir tambien a este locale (en-US, de-DE...). Exige que
-        /// --language sea concreto: el traductor necesita saber el origen.
+        /// Translate to this locale as well (en-US, de-DE...). Requires
+        /// --language to be specific: the translator needs to know the source.
         #[arg(long)]
         translate_to: Option<String>,
-        /// Ruta a mt_server.py.
+        /// Path to mt_server.py.
         #[arg(long, default_value = "sidecar/mt_server.py")]
         mt_script: PathBuf,
     },
 
-    /// Sintetiza un texto y lo reproduce en un dispositivo de salida. Es la
-    /// prueba del microfono virtual sin reunion: manda la voz a CABLE Input
-    /// y, si algo grabando de CABLE Output la oye, el circuito funciona.
+    /// Synthesize a text and play it on an output device. It is the virtual
+    /// microphone test without a meeting: it sends the voice to CABLE Input
+    /// and, if something recording from CABLE Output hears it, the loop works.
     Speak {
-        /// Texto a decir.
+        /// Text to say.
         #[arg(long)]
         text: String,
-        /// Idioma del texto (codigo corto: en, es, de...).
+        /// Language of the text (short code: en, es, de...).
         #[arg(long, default_value = "en")]
         lang: String,
-        /// Dispositivo de salida (id de `asr-cli devices`). Sin el, el
-        /// predeterminado: suena por los altavoces.
+        /// Output device (id from `asr-cli devices`). Without it, the
+        /// default one: it plays through the speakers.
         #[arg(long)]
         device_id: Option<String>,
-        /// chatterbox (clonacion) o kokoro (voz neutra, mas ligero).
+        /// chatterbox (cloning) or kokoro (neutral voice, lighter).
         #[arg(long, default_value = "chatterbox")]
         engine: String,
-        /// WAV con la voz a clonar (obligatorio con chatterbox).
+        /// WAV with the voice to clone (required with chatterbox).
         #[arg(long)]
         voice_wav: Option<PathBuf>,
-        /// Voz preajustada de kokoro.
+        /// Preset kokoro voice.
         #[arg(long, default_value = "af_heart")]
         kokoro_voice: String,
-        /// Interprete del venv de voz (no es el del ASR).
+        /// Interpreter of the voice venv (not the ASR one).
         #[arg(long)]
         python: Option<PathBuf>,
-        /// Ruta a tts_server.py.
+        /// Path to tts_server.py.
         #[arg(long, default_value = "sidecar/tts_server.py")]
         script: PathBuf,
     },
@@ -201,17 +201,17 @@ fn main() -> Result<()> {
 
 fn devices() -> Result<()> {
     for (kind, title) in [
-        (DeviceKind::Output, "SALIDAS (capturables por loopback)"),
-        (DeviceKind::Input, "ENTRADAS (microfonos)"),
+        (DeviceKind::Output, "OUTPUTS (capturable by loopback)"),
+        (DeviceKind::Input, "INPUTS (microphones)"),
     ] {
         println!("\n{title}");
         println!("{}", "-".repeat(title.len()));
-        for device in list_devices(kind).context("enumerando dispositivos")? {
+        for device in list_devices(kind).context("enumerating devices")? {
             let mark = if device.is_default { "*" } else { " " };
             println!("{mark} {}\n    id: {}", device.name, device.id);
         }
     }
-    println!("\n(* = predeterminado)");
+    println!("\n(* = default)");
     Ok(())
 }
 
@@ -227,12 +227,12 @@ fn target_for(which: Which, device_id: Option<String>, pid: Option<u32>) -> Capt
 
 fn level(which: Which, device_id: Option<String>, seconds: u64, pid: Option<u32>) -> Result<()> {
     let target = target_for(which, device_id, pid);
-    println!("capturando de {target:?} durante {seconds}s...");
-    println!("(si el nivel se queda en 0, no esta entrando audio)\n");
+    println!("capturing from {target:?} for {seconds}s...");
+    println!("(if the level stays at 0, no audio is coming in)\n");
 
     let running = Arc::new(AtomicBool::new(true));
     let (tx, rx) = sync_channel::<Vec<f32>>(64);
-    let handle = spawn_capture(target, running.clone(), tx).context("arrancando la captura")?;
+    let handle = spawn_capture(target, running.clone(), tx).context("starting the capture")?;
 
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut blocks = 0usize;
@@ -252,20 +252,20 @@ fn level(which: Which, device_id: Option<String>, seconds: u64, pid: Option<u32>
                 samples += block.len();
                 if blocks % 5 == 0 {
                     println!(
-                        "{}  rms {:.5}  ganancia x{:.1}{}",
+                        "{}  rms {:.5}  gain x{:.1}{}",
                         meter(asr_audio::rms(&block)),
                         rms,
                         normalizer.gain(),
-                        if normalizer.at_ceiling() { "  <-- al tope" } else { "" }
+                        if normalizer.at_ceiling() { "  <-- at ceiling" } else { "" }
                     );
                 }
             }
             Err(_) => {
                 if !running.load(Ordering::Relaxed) {
-                    println!("la captura se detuvo sola (mira los errores de arriba)");
+                    println!("the capture stopped on its own (look at the errors above)");
                     break;
                 }
-                println!("... sin datos");
+                println!("... no data");
             }
         }
     }
@@ -274,19 +274,19 @@ fn level(which: Which, device_id: Option<String>, seconds: u64, pid: Option<u32>
     let _ = handle.join();
 
     let secs = samples as f64 / asr_audio::TARGET_RATE as f64;
-    println!("\n{blocks} bloques, {samples} muestras = {secs:.2}s de audio a 16 kHz mono");
-    println!("pico rms crudo {peak:.5}  (ganancia final x{:.1})", normalizer.gain());
+    println!("\n{blocks} blocks, {samples} samples = {secs:.2}s of audio at 16 kHz mono");
+    println!("raw rms peak {peak:.5}  (final gain x{:.1})", normalizer.gain());
 
     if blocks == 0 {
-        println!("\nNo llego ni un bloque. Con loopback eso significa que el dispositivo");
-        println!("estaba completamente ocioso: Windows no genera eventos si nadie");
-        println!("reproduce nada. Pon musica o un video y repite.");
+        println!("\nNot a single block arrived. With loopback that means the device");
+        println!("was completely idle: Windows generates no events if nobody is");
+        println!("playing anything. Put on music or a video and try again.");
     } else if peak == 0.0 {
-        println!("\nLlego audio pero todo a cero: el dispositivo esta silenciado.");
+        println!("\nAudio arrived but all zeros: the device is muted.");
     } else if normalizer.at_ceiling() {
-        println!("\nAviso: la normalizacion se quedo al tope. El volumen del sistema");
-        println!("esta muy bajo y el loopback captura despues del volumen, asi que la");
-        println!("transcripcion saldra pobre. Sube el volumen de Windows.");
+        println!("\nWarning: normalization stayed at the ceiling. The system volume");
+        println!("is very low and loopback captures after the volume, so the");
+        println!("transcription will come out poor. Turn up the Windows volume.");
     }
     Ok(())
 }
@@ -323,7 +323,7 @@ fn run(args: RunArgs) -> Result<()> {
 
     anyhow::ensure!(
         sidecar.script.exists(),
-        "no encuentro el script del sidecar en {}",
+        "cannot find the sidecar script at {}",
         sidecar.script.display()
     );
 
@@ -345,8 +345,8 @@ fn run(args: RunArgs) -> Result<()> {
         Some(target) => {
             anyhow::ensure!(
                 sidecar.language != "auto",
-                "para traducir hay que pasar --language con un idioma concreto: \
-                 el traductor necesita saber desde cual parte"
+                "to translate you have to pass --language with a specific language: \
+                 the translator needs to know which one it starts from"
             );
             let mt = MtConfig {
                 python: sidecar.python.clone(),
@@ -356,13 +356,13 @@ fn run(args: RunArgs) -> Result<()> {
             };
             anyhow::ensure!(
                 mt.script.exists(),
-                "no encuentro el sidecar de traduccion en {}",
+                "cannot find the translation sidecar at {}",
                 mt.script.display()
             );
-            println!("arrancando el traductor (la primera vez descarga NLLB)...");
+            println!("starting the translator (the first time it downloads NLLB)...");
             let mt_sidecar = MtSidecar::spawn(&mt)?;
             let device = mt_sidecar.wait_ready(Duration::from_secs(300))?;
-            println!("traductor listo en {device}, destino {target}");
+            println!("translator ready on {device}, target {target}");
             // La bomba lleva un par (origen, destino) por fuente. El CLI
             // captura una sola, y el usuario pide "transcribe --language X y
             // traduce a Y": ese es el par de su fuente; el de la otra no se
@@ -372,9 +372,9 @@ fn run(args: RunArgs) -> Result<()> {
         }
     };
 
-    println!("arrancando el modelo (tarda unos segundos)...");
+    println!("starting the model (takes a few seconds)...");
     let (tx, rx) = std::sync::mpsc::channel::<SessionEvent>();
-    let session = Session::start(cfg, &sidecar, tx).context("arrancando la sesion")?;
+    let session = Session::start(cfg, &sidecar, tx).context("starting the session")?;
 
     let mut transcript = Transcript::new();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -401,8 +401,8 @@ fn run(args: RunArgs) -> Result<()> {
                 language,
                 ..
             } => {
-                println!("motor listo en {device}, latencia {latency_ms} ms, idioma {language}");
-                println!("--- transcripcion ---");
+                println!("engine ready on {device}, latency {latency_ms} ms, language {language}");
+                println!("--- transcript ---");
             }
             SessionEvent::Delta { at_ms, text, .. } => {
                 print!("{text}");
@@ -419,18 +419,18 @@ fn run(args: RunArgs) -> Result<()> {
                 // Solo de vez en cuando, para no tapar el texto.
                 if last_level_print.elapsed() > Duration::from_secs(5) {
                     last_level_print = Instant::now();
-                    tracing::debug!("nivel {rms:.5}");
+                    tracing::debug!("level {rms:.5}");
                 }
             }
             SessionEvent::Error { message, .. } => eprintln!("\n[error] {message}"),
             SessionEvent::Stopped { .. } => {
-                println!("\nla sesion se detuvo");
+                println!("\nthe session stopped");
                 break;
             }
         }
     }
 
-    println!("\n--- fin ---");
+    println!("\n--- end ---");
     session.join();
     transcript.close_all(args.seconds * 1000);
     if let Some(mut pump) = pump {
@@ -438,18 +438,18 @@ fn run(args: RunArgs) -> Result<()> {
     }
 
     if transcript.is_empty() {
-        println!("no se transcribio nada");
+        println!("nothing was transcribed");
     } else {
         println!("\n{}", transcript.to_text());
     }
 
     if let Some(path) = args.save_txt {
         transcript.save_text(&path)?;
-        println!("guardado {}", path.display());
+        println!("saved {}", path.display());
     }
     if let Some(path) = args.save_srt {
         transcript.save_srt(&path)?;
-        println!("guardado {}", path.display());
+        println!("saved {}", path.display());
     }
     Ok(())
 }
@@ -479,31 +479,31 @@ fn speak(args: SpeakArgs) -> Result<()> {
 
     anyhow::ensure!(
         tts.script.exists(),
-        "no encuentro el sidecar de voz en {}",
+        "cannot find the voice sidecar at {}",
         tts.script.display()
     );
     anyhow::ensure!(
         tts.python.exists(),
-        "no encuentro el interprete del venv de voz en {} (pasalo con --python)",
+        "cannot find the voice venv interpreter at {} (pass it with --python)",
         tts.python.display()
     );
     if tts.engine == "chatterbox" {
         anyhow::ensure!(
             tts.voice_wav.is_some(),
-            "chatterbox clona una voz: pasa --voice-wav con 10-30 s de habla \
-             limpia, o usa --engine kokoro para una voz neutra"
+            "chatterbox clones a voice: pass --voice-wav with 10-30 s of clean \
+             speech, or use --engine kokoro for a neutral voice"
         );
     }
 
-    println!("arrancando el sintetizador (chatterbox tarda ~21 s en frio)...");
+    println!("starting the synthesizer (chatterbox takes ~21 s cold)...");
     let mut sidecar = TtsSidecar::spawn(&tts)?;
     let ready = sidecar.wait_ready(Duration::from_secs(300))?;
-    println!("sintetizador listo en {} a {} Hz", ready.device, ready.rate);
+    println!("synthesizer ready on {} at {} Hz", ready.device, ready.rate);
 
     let synthesized = sidecar.synthesize(&args.text, &args.lang)?;
     let audio_secs = synthesized.samples.len() as f32 / synthesized.rate as f32;
     println!(
-        "sintetizado: {audio_secs:.2}s de audio en {} ms (RTFx {:.2}x)",
+        "synthesized: {audio_secs:.2}s of audio in {} ms (RTFx {:.2}x)",
         synthesized.synth_ms,
         audio_secs / (synthesized.synth_ms as f32 / 1000.0).max(0.001),
     );
@@ -521,21 +521,21 @@ fn speak(args: SpeakArgs) -> Result<()> {
         queued,
         startup_tx,
     )
-    .context("arrancando la salida de audio")?;
+    .context("starting the audio output")?;
 
-    // Sin esperar el arranque, un dispositivo inexistente imprimiria "hecho"
+    // Sin esperar el arranque, un dispositivo inexistente imprimiria "done"
     // sin haber sonado nada.
     match startup_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => anyhow::bail!("no se pudo abrir el dispositivo de salida: {e}"),
-        Err(_) => anyhow::bail!("la salida de audio no respondio al abrir"),
+        Ok(Err(e)) => anyhow::bail!("could not open the output device: {e}"),
+        Err(_) => anyhow::bail!("the audio output did not respond on open"),
     }
 
     tx.send(synthesized.samples)?;
     drop(tx); // el hilo de render termina solo cuando acabe de reproducir
-    println!("reproduciendo...");
+    println!("playing...");
     let _ = handle.join();
-    println!("hecho");
+    println!("done");
 
     sidecar.shutdown()?;
     Ok(())

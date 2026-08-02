@@ -204,7 +204,7 @@ shows the effective path so there is never any doubt, and the export command rec
 only a filename — Rust decides the folder.
 
 Filenames are `YYYY_MM_DD_<name>.<ext>`, with a configurable base name and a
-per-format suffix (`_traducida`, `_bilingue`). If one already exists that day, `_2`,
+per-format suffix (`_translated`, `_bilingual`). If one already exists that day, `_2`,
 `_3`… is appended rather than overwriting: two exports on the same day with the same
 name are normal, and silently losing the first one is not.
 

@@ -192,8 +192,8 @@ pub fn sanitize_file_stem(name: &str) -> String {
 fn format_parts(format: &str) -> (&'static str, &'static str) {
     match format {
         "srt" => ("", "srt"),
-        "translated-srt" => ("_traducida", "srt"),
-        "bilingual" => ("_bilingue", "txt"),
+        "translated-srt" => ("_translated", "srt"),
+        "bilingual" => ("_bilingual", "txt"),
         _ => ("", "txt"),
     }
 }
@@ -446,11 +446,11 @@ mod tests {
     fn cada_formato_tiene_su_sufijo() {
         assert_eq!(
             compose_filename("2026_07_28", "clase", "translated-srt"),
-            "2026_07_28_clase_traducida.srt"
+            "2026_07_28_clase_translated.srt"
         );
         assert_eq!(
             compose_filename("2026_07_28", "clase", "bilingual"),
-            "2026_07_28_clase_bilingue.txt"
+            "2026_07_28_clase_bilingual.txt"
         );
     }
 

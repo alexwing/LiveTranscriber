@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Comprueba que una instalacion de LiveTranscriber funciona.
+    Checks that a LiveTranscriber installation works.
 
 .DESCRIPTION
-    Se puede lanzar suelto cuando algo deje de ir. Repasa, en orden de
-    dependencia, cada pieza que tiene que estar en su sitio, y para en la
-    primera que falle diciendo que hacer.
+    Can be run on its own when something stops working. It walks, in dependency
+    order, through every piece that has to be in place, and stops at the first
+    one that fails, saying what to do about it.
 
-    Lo llama `install.ps1` al final, pero vale por si mismo.
+    `install.ps1` calls it at the end, but it stands on its own.
 
 .EXAMPLE
     .\scripts\verify.ps1
@@ -57,21 +57,21 @@ function Pass($detail) {
     if ($detail) { Write-Host "  $detail" -ForegroundColor DarkGray } else { Write-Host "" }
 }
 function Bad($detail, $fix) {
-    Write-Host "FALLO" -ForegroundColor Red -NoNewline
+    Write-Host "FAILED" -ForegroundColor Red -NoNewline
     Write-Host "  $detail" -ForegroundColor Red
     if ($fix) { Write-Host "         -> $fix" -ForegroundColor Yellow }
     $script:Failed++
 }
 
 Write-Host ""
-Write-Host "  Verificacion" -ForegroundColor White
+Write-Host "  Verification" -ForegroundColor White
 Write-Host ""
 
 # --- configuracion ---------------------------------------------------------
 $configPath = Join-Path $Root "transcriber-config.toml"
-Check "configuracion"
+Check "configuration"
 if (-not (Test-Path $configPath)) {
-    Bad "no existe transcriber-config.toml" "ejecuta scripts\install.ps1"
+    Bad "transcriber-config.toml not found" "run scripts\install.ps1"
     exit 1
 }
 Pass $configPath
@@ -89,14 +89,14 @@ $hfHome = Get-Value "hf_home"
 $outDir = Get-Value "output_dir"
 
 # --- interprete ------------------------------------------------------------
-Check "interprete de Python"
+Check "Python interpreter"
 if (-not $python -or -not (Test-Path $python)) {
-    Bad "no existe: $python" "corrige `python` en transcriber-config.toml"
+    Bad "not found: $python" "fix `python` in transcriber-config.toml"
     exit 1
 }
 $pv = Invoke-Native $python @("-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])")
 if ($pv.Code -ne 0) {
-    Bad "no arranca" "rehaz el entorno con install.ps1 -Force"
+    Bad "does not start" "rebuild the environment with install.ps1 -Force"
     exit 1
 }
 Pass "Python $($pv.Output.Trim())"
@@ -104,33 +104,33 @@ Pass "Python $($pv.Output.Trim())"
 # De donde sale el interprete importa: si es de otro proyecto, esto funciona
 # hasta el dia en que ese proyecto se mueva, se borre o se le instale algo que
 # rompa la compatibilidad. Conviene que se vea, no que se descubra el dia malo.
-Check "de quien es el entorno"
+Check "environment ownership"
 $ownVenv = Join-Path $Root ".venv"
 if ($python -like (Join-Path $ownVenv "*")) {
-    Pass "propio (.venv del proyecto)"
+    Pass "own (project .venv)"
 } else {
-    Write-Host "COMPARTIDO" -ForegroundColor Yellow -NoNewline
-    Write-Host "  esta fuera del proyecto" -ForegroundColor DarkGray
+    Write-Host "SHARED" -ForegroundColor Yellow -NoNewline
+    Write-Host "  it is outside the project" -ForegroundColor DarkGray
     Write-Host ("         -> {0}" -f (Split-Path -Parent (Split-Path -Parent $python))) -ForegroundColor DarkGray
-    Write-Host "         -> vale, pero si mueves o limpias ese proyecto esto deja de arrancar." -ForegroundColor DarkGray
-    Write-Host "            Para uno propio: .\scripts\install.ps1" -ForegroundColor DarkGray
+    Write-Host "         -> fine, but if you move or clean that project this stops starting." -ForegroundColor DarkGray
+    Write-Host "            For your own: .\scripts\install.ps1" -ForegroundColor DarkGray
 }
 
 # --- sidecars --------------------------------------------------------------
-foreach ($pair in @(@("sidecar de ASR", "script"), @("sidecar de traduccion", "mt_script"))) {
+foreach ($pair in @(@("ASR sidecar", "script"), @("translation sidecar", "mt_script"))) {
     Check $pair[0]
     $rel = Get-Value $pair[1]
     $abs = $rel
     if (-not [System.IO.Path]::IsPathRooted($rel)) { $abs = Join-Path $Root $rel }
-    if (Test-Path $abs) { Pass $rel } else { Bad "no existe: $abs" "revisa la ruta en la configuracion" }
+    if (Test-Path $abs) { Pass $rel } else { Bad "not found: $abs" "check the path in the configuration" }
 }
 
 # --- torch y CUDA ----------------------------------------------------------
-Check "PyTorch y CUDA"
+Check "PyTorch and CUDA"
 $torchScript = @"
 import torch
 ok = torch.cuda.is_available()
-name = torch.cuda.get_device_name() if ok else 'sin GPU'
+name = torch.cuda.get_device_name() if ok else 'no GPU'
 cap = torch.cuda.get_device_capability() if ok else (0, 0)
 tag = 'sm_%d%d' % cap
 arches = torch.cuda.get_arch_list()
@@ -138,20 +138,20 @@ print('%s|%s|%s|%d.%d|%s' % (torch.__version__, ok, name, cap[0], cap[1], tag in
 "@
 $torch = Invoke-Native $python @("-c", $torchScript)
 if ($torch.Code -ne 0) {
-    Bad "no se puede importar torch" "install.ps1 -Force"
+    Bad "cannot import torch" "install.ps1 -Force"
 } else {
     $f = $torch.Output.Trim() -split "\|"
     if ($f[1] -ne "True") {
-        Bad "torch no ve la GPU" "comprueba el driver de NVIDIA con nvidia-smi"
+        Bad "torch does not see the GPU" "check the NVIDIA driver with nvidia-smi"
     } elseif ($f[4] -ne "True") {
-        Bad "la rueda de torch no trae codigo para $($f[2])" "hace falta otra version de CUDA"
+        Bad "the torch wheel has no code for $($f[2])" "a different CUDA version is needed"
     } else {
         Pass "$($f[0]) - $($f[2]) - capability $($f[3])"
         # Coherencia entre la precision configurada y lo que soporta la tarjeta.
         $major = [int]($f[3] -split "\.")[0]
-        Check "precision configurada"
+        Check "configured precision"
         if ($dtype -eq "bfloat16" -and $major -lt 8) {
-            Bad "dtype = bfloat16 pero esta GPU no lo tiene nativo" "pon dtype = `"float16`" en la configuracion"
+            Bad "dtype = bfloat16 but this GPU has no native support" "set dtype = `"float16`" in the configuration"
         } else {
             Pass $dtype
         }
@@ -162,36 +162,36 @@ if ($torch.Code -ne 0) {
 Check "transformers"
 $tvProbe = Invoke-Native $python @("-c", "import transformers; print(transformers.__version__)")
 if ($tvProbe.Code -ne 0) {
-    Bad "no instalado" "install.ps1"
+    Bad "not installed" "install.ps1"
 } else {
     $tv = $tvProbe.Output.Trim()
     $clean = ($tv -replace '[^\d.].*$','')
     if ([version]$clean -lt [version]"5.13") {
-        Bad "$tv es demasiado antigua" "hace falta 5.13+: ahi vive AutoModelForRNNT"
+        Bad "$tv is too old" "5.13+ is required: that is where AutoModelForRNNT lives"
     } else {
         Pass $tv
     }
 }
 
 # --- modelos en cache ------------------------------------------------------
-Check "modelos descargados"
+Check "downloaded models"
 if ($hfHome) { $hubRoot = Join-Path $hfHome "hub" } else { $hubRoot = Join-Path $env:USERPROFILE ".cache\huggingface\hub" }
 $asrDir = Join-Path $hubRoot "models--nvidia--nemotron-3.5-asr-streaming-0.6b"
 if (Test-Path $asrDir) {
     $size = (Get-ChildItem $asrDir -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB
     Pass ("ASR {0:N2} GB" -f $size)
 } else {
-    Bad "falta el modelo de ASR en $hubRoot" "python scripts\fetch_models.py"
+    Bad "the ASR model is missing in $hubRoot" "python scripts\fetch_models.py"
 }
 
-Check "modelo de traduccion"
+Check "translation model"
 $mtDir = Join-Path $hubRoot "models--facebook--nllb-200-distilled-600M"
 if (Test-Path $mtDir) {
     $size = (Get-ChildItem $mtDir -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB
     Pass ("NLLB {0:N2} GB" -f $size)
 } else {
-    Write-Host "AUSENTE" -ForegroundColor Yellow -NoNewline
-    Write-Host "  solo hace falta si activas la traduccion" -ForegroundColor DarkGray
+    Write-Host "MISSING" -ForegroundColor Yellow -NoNewline
+    Write-Host "  only needed if you turn translation on" -ForegroundColor DarkGray
 }
 
 # --- voz sintetica (opcional) ------------------------------------------------
@@ -206,95 +206,95 @@ function Get-SpeakValue($key) {
     return $null
 }
 
-Check "voz sintetica"
+Check "synthetic voice"
 if (-not $speakSection -or (Get-SpeakValue "enabled") -ne "true") {
-    Write-Host "DESACTIVADA" -ForegroundColor Yellow -NoNewline
-    Write-Host "  opcional; se activa en la app (seccion 'Hablar por mi')" -ForegroundColor DarkGray
+    Write-Host "DISABLED" -ForegroundColor Yellow -NoNewline
+    Write-Host "  optional; turn it on in the app ('Speak for me' section)" -ForegroundColor DarkGray
 } else {
-    Pass "activada"
+    Pass "enabled"
 
     $speakPython = Get-SpeakValue "python"
-    Check "interprete del venv de voz"
+    Check "voice venv interpreter"
     if (-not $speakPython -or -not (Test-Path $speakPython)) {
-        Bad "no existe: $speakPython" "install.ps1 -WithVoice, o corrige [speak].python"
+        Bad "not found: $speakPython" "install.ps1 -WithVoice, or fix [speak].python"
     } else {
         $spv = Invoke-Native $speakPython @("-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])")
         if ($spv.Code -ne 0) {
-            Bad "no arranca" "install.ps1 -WithVoice -Force"
+            Bad "does not start" "install.ps1 -WithVoice -Force"
         } else {
             Pass "Python $($spv.Output.Trim())"
 
             # La sonda que de verdad separa "venv creado" de "venv utilizable".
-            Check "motores de voz"
+            Check "voice engines"
             $engines = Invoke-Native $speakPython @("-c", "import chatterbox.mtl_tts, kokoro; print('ok')")
             if ($engines.Code -ne 0) {
-                Bad "chatterbox/kokoro no se pueden importar" "install.ps1 -WithVoice (las dependencias van en sidecar\requirements-tts.txt)"
+                Bad "chatterbox/kokoro cannot be imported" "install.ps1 -WithVoice (the dependencies live in sidecar\requirements-tts.txt)"
             } else {
-                Pass "chatterbox y kokoro importables"
+                Pass "chatterbox and kokoro are importable"
             }
         }
     }
 
-    Check "sidecar de voz"
+    Check "voice sidecar"
     $speakScript = Get-SpeakValue "script"
     if (-not $speakScript) { $speakScript = "sidecar/tts_server.py" }
     $abs = $speakScript
     if (-not [System.IO.Path]::IsPathRooted($abs)) { $abs = Join-Path $Root $abs }
-    if (Test-Path $abs) { Pass $speakScript } else { Bad "no existe: $abs" "revisa [speak].script en la configuracion" }
+    if (Test-Path $abs) { Pass $speakScript } else { Bad "not found: $abs" "check [speak].script in the configuration" }
 
     if ((Get-SpeakValue "engine") -ne "kokoro") {
-        Check "muestra de voz a clonar"
+        Check "voice sample to clone"
         $wav = Get-SpeakValue "voice_wav"
         if ($wav -and (Test-Path $wav)) {
             Pass $wav
         } elseif ($wav) {
-            Bad "no existe: $wav" "elige el WAV en la app o corrige [speak].voice_wav"
+            Bad "not found: $wav" "pick the WAV in the app or fix [speak].voice_wav"
         } else {
-            Bad "sin configurar" "graba 10-30 s de tu voz y eligela en la app; chatterbox no arranca sin ella"
+            Bad "not configured" "record 10-30 s of your voice and pick it in the app; chatterbox will not start without it"
         }
     }
 
-    Check "modelo de voz"
+    Check "voice model"
     $cbDir = Join-Path $hubRoot "models--ResembleAI--chatterbox"
     if (Test-Path $cbDir) {
         $size = (Get-ChildItem $cbDir -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB
         Pass ("chatterbox {0:N2} GB" -f $size)
     } else {
-        Write-Host "AUSENTE" -ForegroundColor Yellow -NoNewline
-        Write-Host "  se descarga solo al primer uso (~3,4 GB); install.ps1 -WithVoice lo deja bajado" -ForegroundColor DarkGray
+        Write-Host "MISSING" -ForegroundColor Yellow -NoNewline
+        Write-Host "  it downloads itself on first use (~3.4 GB); install.ps1 -WithVoice leaves it downloaded" -ForegroundColor DarkGray
     }
 }
 
 # --- carpeta de salida -----------------------------------------------------
-Check "carpeta de salida"
+Check "output folder"
 if ($outDir -and [System.IO.Path]::IsPathRooted($outDir)) {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Pass $outDir
 } else {
-    Bad "no es una ruta absoluta: $outDir" "eligela en la app o pon una ruta completa"
+    Bad "not an absolute path: $outDir" "pick it in the app or set a full path"
 }
 
 # --- captura de audio ------------------------------------------------------
-Check "captura WASAPI"
+Check "WASAPI capture"
 $cli = Join-Path $Root "target\debug\asr-cli.exe"
 if (-not (Test-Path $cli)) { $cli = Join-Path $Root "target\release\asr-cli.exe" }
 if (Test-Path $cli) {
     $devices = Invoke-Native $cli @("devices")
     if ($devices.Code -eq 0) {
         $n = @($devices.Output -split "`n" | Where-Object { $_ -match "^\s+id: " }).Count
-        Pass "$n dispositivos"
+        Pass "$n devices"
     } else {
-        Bad "asr-cli devices fallo" "mira la salida de: $cli devices"
+        Bad "asr-cli devices failed" "look at the output of: $cli devices"
     }
 } else {
-    Write-Host "OMITIDO" -ForegroundColor Yellow -NoNewline
-    Write-Host "  compila con: cargo build --workspace" -ForegroundColor DarkGray
+    Write-Host "SKIPPED" -ForegroundColor Yellow -NoNewline
+    Write-Host "  build it with: cargo build --workspace" -ForegroundColor DarkGray
 }
 
 # --- la prueba de verdad ---------------------------------------------------
 if ($script:Failed -eq 0) {
     Write-Host ""
-    Write-Host "  Prueba de la tuberia completa (carga el modelo, tarda un poco)" -ForegroundColor White
+    Write-Host "  Full pipeline test (loads the model, takes a while)" -ForegroundColor White
     $smoke = Join-Path $PSScriptRoot "smoke_test.py"
     if (Test-Path $smoke) {
         $dt = $dtype
@@ -306,10 +306,10 @@ if ($script:Failed -eq 0) {
 
 Write-Host ""
 if ($script:Failed -eq 0) {
-    Write-Host "  Todo en orden." -ForegroundColor Green
+    Write-Host "  All good." -ForegroundColor Green
     Write-Host ""
     exit 0
 }
-Write-Host "  $($script:Failed) comprobacion(es) fallaron." -ForegroundColor Red
+Write-Host "  $($script:Failed) check(s) failed." -ForegroundColor Red
 Write-Host ""
 exit 1

@@ -32,7 +32,7 @@ cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -InstallPython
 If the C: drive is tight, put the models somewhere else:
 
 ```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -ModelsDir D:\modelos
+cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -ModelsDir D:\models
 ```
 
 With the synthetic voice (speaking your translation through a virtual microphone):
@@ -144,8 +144,8 @@ machine**:
 
 That has a useful consequence: if you already had them from another project, the
 installer **downloads nothing**. `fetch_models.py` opens them, checks they are
-complete and moves on. Its output says so: *"ya estaba todo en cache"* versus
-*"descargado: X GB"*.
+complete and moves on. Its output says so: *"everything was already cached"* versus
+*"downloaded: X GB"*.
 
 With `-ModelsDir` the cache moves wherever you say and `hf_home` is written into the
 configuration. The sidecars receive it as the environment variable `HF_HOME`, which
@@ -154,7 +154,7 @@ is the only way the Python library will see it.
 The virtual environment, by contrast, is per project and is **not** shared
 automatically: it is ~4.7 GB of PyTorch. If you point the configuration at
 another project's `python.exe`, it works — `verify.ps1` detects it and flags it
-as `COMPARTIDO` — but it is then tied to that project staying where it is.
+as `SHARED` — but it is then tied to that project staying where it is.
 
 ## Verifying when something fails
 

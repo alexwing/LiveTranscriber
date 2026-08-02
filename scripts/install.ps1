@@ -1,46 +1,46 @@
 <#
 .SYNOPSIS
-    Deja LiveTranscriber listo para funcionar en un Windows recien puesto.
+    Gets LiveTranscriber ready to run on a freshly built Windows.
 
 .DESCRIPTION
-    Provisiona el entorno de Python, descarga los modelos, escribe la
-    configuracion con las rutas absolutas correctas y comprueba que todo
-    arranca de verdad. Se puede volver a ejecutar sin romper nada.
+    Provisions the Python environment, downloads the models, writes the
+    configuration with the right absolute paths and checks that everything
+    really starts. It can be run again without breaking anything.
 
-    Lo que NO hace: instalar el driver de NVIDIA. Eso va antes y a mano.
+    What it does NOT do: install the NVIDIA driver. That comes first, by hand.
 
 .PARAMETER ModelsDir
-    Donde guardar los modelos (~7 GB). Por defecto la cache de Hugging Face en
-    el perfil del usuario. Util si el disco C: va justo.
+    Where to keep the models (~7 GB). Defaults to the Hugging Face cache in
+    the user profile. Useful if the C: drive is tight.
 
 .PARAMETER SkipTranslator
-    No descargar NLLB. Ahorra unos 2,4 GB si no vas a traducir.
+    Don't download NLLB. Saves about 2.4 GB if you aren't going to translate.
 
 .PARAMETER WithVoice
-    Montar tambien la voz sintetica (hablar tu traduccion por un microfono
-    virtual). Es opt-in porque no es barata: un segundo entorno de Python con
-    su propio torch (~7 GB) mas los modelos de voz (~4 GB). El porque del
-    segundo entorno esta en sidecar/requirements-tts.txt: el ASR exige
-    transformers>=5.13 y chatterbox-tts esta probado con 4.57.x.
+    Also set up the synthetic voice (speaking your translation through a
+    virtual microphone). It is opt-in because it isn't cheap: a second Python
+    environment with its own torch (~7 GB) plus the voice models (~4 GB). The
+    reason for the second environment is in sidecar/requirements-tts.txt: the
+    ASR requires transformers>=5.13 and chatterbox-tts is tested with 4.57.x.
 
 .PARAMETER SkipBuild
-    No compilar la aplicacion. Solo provisiona Python y los modelos.
+    Don't build the application. Provisions Python and the models only.
 
 .PARAMETER SkipVerify
-    Saltarse la comprobacion final. No recomendado: es lo unico que distingue
-    "instalado" de "instalado y funcionando".
+    Skip the final check. Not recommended: it is the only thing that tells
+    "installed" from "installed and working".
 
 .PARAMETER InstallPython
-    Si no hay un Python valido, instalarlo con winget.
+    If there is no valid Python, install it with winget.
 
 .PARAMETER Force
-    Rehacer el entorno virtual aunque ya exista.
+    Rebuild the virtual environment even if it already exists.
 
 .EXAMPLE
     .\scripts\install.ps1
 
 .EXAMPLE
-    .\scripts\install.ps1 -ModelsDir D:\modelos -SkipTranslator
+    .\scripts\install.ps1 -ModelsDir D:\models -SkipTranslator
 
 .EXAMPLE
     .\scripts\install.ps1 -WithVoice
@@ -90,7 +90,7 @@ function Write-Warn2($text) {
 }
 function Fail($text) {
     Write-Host ""
-    Write-Host "  FALLO: $text" -ForegroundColor Red
+    Write-Host "  FAILED: $text" -ForegroundColor Red
     exit 1
 }
 
@@ -147,23 +147,23 @@ function Invoke-NativeLive {
 }
 
 Write-Host ""
-Write-Host "  LiveTranscriber - instalacion" -ForegroundColor White
+Write-Host "  LiveTranscriber - installation" -ForegroundColor White
 Write-Host "  $Root" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
-Write-Step "Comprobaciones previas"
+Write-Step "Preflight checks"
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Fail "hace falta Windows de 64 bits"
+    Fail "64-bit Windows is required"
 }
-Write-Ok "Windows 64 bits"
+Write-Ok "64-bit Windows"
 
 $drive = (Get-Item $Root).PSDrive.Name
 $free = (Get-PSDrive $drive).Free / 1GB
 if ($free -lt $NeedGB) {
-    Fail ("en {0}: quedan {1:N1} GB y hacen falta unos {2} GB (entorno de Python + modelos)" -f $drive, $free, $NeedGB)
+    Fail ("on {0}: {1:N1} GB left and about {2} GB are needed (Python environment + models)" -f $drive, $free, $NeedGB)
 }
-Write-Ok ("espacio en {0}: {1:N1} GB libres" -f $drive, $free)
+Write-Ok ("space on {0}: {1:N1} GB free" -f $drive, $free)
 
 # La GPU: sin ella el modelo va a CPU y no da tiempo real, asi que se avisa
 # fuerte pero no se aborta.
@@ -173,7 +173,7 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     $smi = Invoke-Native "nvidia-smi" @("--query-gpu=name,driver_version,memory.total,compute_cap", "--format=csv,noheader") -Quiet
     $gpus = @($smi.Output -split "`n" | Where-Object { $_ -and $_.Trim() })
     if ($gpus.Count -eq 0) {
-        Write-Warn2 "nvidia-smi no devuelve ninguna GPU"
+        Write-Warn2 "nvidia-smi returns no GPU"
     }
     $i = 0
     foreach ($line in $gpus) {
@@ -186,21 +186,21 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
                 # bfloat16 necesita Ampere. En Turing PyTorch lo EMULA en vez de
                 # fallar, y la app va lentisima sin ninguna pista del motivo.
                 $dtype = "float16"
-                Write-Warn2 "$($f[0]) no tiene bfloat16 nativo (hace falta capability 8.0+). Se configura float16."
-                Write-Info "float16 transcribe algo peor que bfloat16 en este modelo. Con float32 no hay perdida, pero es mas lento."
+                Write-Warn2 "$($f[0]) has no native bfloat16 (capability 8.0+ is required). Setting float16."
+                Write-Info "float16 transcribes slightly worse than bfloat16 on this model. With float32 there is no loss, but it is slower."
             }
         }
         $i++
     }
     if ($gpus.Count -gt 1) {
-        Write-Info "Hay $($gpus.Count) GPU pero la app usa solo la primera. Una sola aguanta unos 4 flujos."
+        Write-Info "There are $($gpus.Count) GPUs but the app uses only the first. One alone handles about 4 streams."
     }
 } else {
-    Write-Warn2 "no se encuentra nvidia-smi: sin GPU NVIDIA esto no va a dar tiempo real"
+    Write-Warn2 "nvidia-smi not found: without an NVIDIA GPU this won't keep up in real time"
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Interprete de Python"
+Write-Step "Python interpreter"
 
 function Find-Python {
     if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -224,9 +224,9 @@ $python = Find-Python
 if (-not $python) {
     if ($InstallPython) {
         if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Fail "no hay winget para instalar Python. Bajalo de https://www.python.org/downloads/"
+            Fail "no winget to install Python with. Get it from https://www.python.org/downloads/"
         }
-        Write-Info "instalando Python 3.12 con winget..."
+        Write-Info "installing Python 3.12 with winget..."
         Invoke-NativeLive "winget" @(
             "install", "-e", "--id", "Python.Python.3.12",
             "--accept-source-agreements", "--accept-package-agreements"
@@ -236,15 +236,15 @@ if (-not $python) {
                     [Environment]::GetEnvironmentVariable("Path", "User")
         $python = Find-Python
         if (-not $python) {
-            Fail "Python instalado pero no localizable. Cierra esta consola, abre otra y vuelve a ejecutar."
+            Fail "Python installed but not locatable. Close this console, open another one and run again."
         }
     } else {
         Write-Host ""
-        Write-Host "  No hay ningun Python de estos: $($SupportedPython -join ', ')" -ForegroundColor Red
-        Write-Host "  (3.14 no sirve todavia: PyTorch no publica ruedas para el)" -ForegroundColor DarkGray
+        Write-Host "  None of these Pythons is here: $($SupportedPython -join ', ')" -ForegroundColor Red
+        Write-Host "  (3.14 won't do yet: PyTorch doesn't publish wheels for it)" -ForegroundColor DarkGray
         Write-Host ""
-        Write-Host "  Instalalo con:      winget install -e --id Python.Python.3.12"
-        Write-Host "  O vuelve a lanzar:  .\scripts\install.ps1 -InstallPython"
+        Write-Host "  Install it with:  winget install -e --id Python.Python.3.12"
+        Write-Host "  Or run again:     .\scripts\install.ps1 -InstallPython"
         exit 1
     }
 }
@@ -253,83 +253,83 @@ Write-Ok "Python $pyVersion"
 Write-Info $python
 
 # ---------------------------------------------------------------------------
-Write-Step "Entorno virtual"
+Write-Step "Virtual environment"
 
 if ((Test-Path $VenvPython) -and -not $Force) {
-    Write-Ok "ya existe, se reutiliza"
-    Write-Info "usa -Force para rehacerlo desde cero"
+    Write-Ok "already there, reused"
+    Write-Info "use -Force to rebuild it from scratch"
 } else {
     if (Test-Path $Venv) {
-        Write-Info "borrando el anterior..."
+        Write-Info "deleting the previous one..."
         Remove-Item $Venv -Recurse -Force
     }
     if ((Invoke-NativeLive $python @("-m", "venv", $Venv)) -ne 0) {
-        Fail "no se pudo crear el entorno virtual"
+        Fail "could not create the virtual environment"
     }
-    Write-Ok "creado en .venv"
+    Write-Ok "created in .venv"
 }
 
 if ((Invoke-NativeLive $VenvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel")) -ne 0) {
-    Fail "no se pudo actualizar pip"
+    Fail "could not upgrade pip"
 }
-Write-Ok "pip al dia"
+Write-Ok "pip up to date"
 
 # ---------------------------------------------------------------------------
-Write-Step "PyTorch con CUDA"
+Write-Step "PyTorch with CUDA"
 
 $probe = Invoke-Native $VenvPython @("-c", "import torch; print(torch.__version__)") -Quiet
 if ($probe.Code -eq 0 -and -not $Force) {
-    Write-Ok "ya instalado: $($probe.Output.Trim())"
+    Write-Ok "already installed: $($probe.Output.Trim())"
 } else {
-    Write-Info "descargando (~2,8 GB, tarda un rato)..."
+    Write-Info "downloading (~2.8 GB, takes a while)..."
     if ((Invoke-NativeLive $VenvPython @("-m", "pip", "install", "torch", "--index-url", $TorchIndex)) -ne 0) {
-        Fail "no se pudo instalar torch"
+        Fail "could not install torch"
     }
-    Write-Ok "instalado"
+    Write-Ok "installed"
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Dependencias de los sidecars"
+Write-Step "Sidecar dependencies"
 
 $req = Join-Path $Root "sidecar\requirements.txt"
-if (-not (Test-Path $req)) { Fail "no encuentro $req" }
+if (-not (Test-Path $req)) { Fail "can't find $req" }
 if ((Invoke-NativeLive $VenvPython @("-m", "pip", "install", "--quiet", "-r", $req)) -ne 0) {
-    Fail "no se pudieron instalar las dependencias"
+    Fail "could not install the dependencies"
 }
 $tv = (Invoke-Native $VenvPython @("-c", "import transformers; print(transformers.__version__)")).Output.Trim()
 Write-Ok "transformers $tv"
 if ([version]($tv -replace '[^\d.].*$','') -lt [version]"5.13") {
-    Fail "hace falta transformers 5.13 o superior: es donde vive AutoModelForRNNT"
+    Fail "transformers 5.13 or newer is required: that is where AutoModelForRNNT lives"
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Compatibilidad de la GPU"
+Write-Step "GPU compatibility"
 
 # Que la rueda traiga codigo para esta tarjeta no es evidente: cu128 empieza en
 # sm_75, asi que una GTX 10xx (sm_61) no valdria. Va despues de instalar numpy
 # porque si no torch avisa de que no lo encuentra y ensucia la salida.
 $archScript = @"
 import torch, sys
-print('CUDA disponible:', torch.cuda.is_available())
-print('arquitecturas:', ' '.join(torch.cuda.get_arch_list()))
+print('CUDA available:', torch.cuda.is_available())
+print('architectures:', ' '.join(torch.cuda.get_arch_list()))
 if torch.cuda.is_available():
     c = torch.cuda.get_device_capability()
     tag = 'sm_%d%d' % c
-    print('esta GPU:', tag)
+    print('this GPU:', tag)
     if tag not in torch.cuda.get_arch_list():
         sys.exit(3)
 "@
 $arch = Invoke-Native $VenvPython @("-c", $archScript)
 if ($arch.Code -eq 3) {
-    Fail "esta rueda de PyTorch no incluye codigo para tu GPU. Hara falta otra version de CUDA."
+    Fail "this PyTorch wheel has no code for your GPU. A different CUDA version will be needed."
 }
-if ($arch.Code -ne 0) { Fail "torch no se puede importar" }
+if ($arch.Code -ne 0) { Fail "torch cannot be imported" }
 foreach ($line in ($arch.Output -split "`n")) {
     if ($line.Trim()) { Write-Info $line.Trim() }
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Modelos"
+Write-Step "Models"
 
 if ($ModelsDir) {
     New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
@@ -341,95 +341,95 @@ if ($ModelsDir) {
 $fetchArgs = @((Join-Path $PSScriptRoot "fetch_models.py"))
 if ($SkipTranslator) { $fetchArgs += "--skip-translator" }
 if ((Invoke-NativeLive $VenvPython $fetchArgs) -ne 0) {
-    Fail "no se pudieron descargar los modelos"
+    Fail "could not download the models"
 }
-Write-Ok "modelos listos"
+Write-Ok "models ready"
 
 # ---------------------------------------------------------------------------
 if ($WithVoice) {
-    Write-Step "Entorno de voz (chatterbox + kokoro)"
+    Write-Step "Voice environment (chatterbox + kokoro)"
 
     # Un venv APARTE del de los otros sidecars, y no es capricho: asr_server
     # exige transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta
     # probado con 4.57.x. Los dos conjuntos no caben en el mismo entorno.
     if ((Test-Path $VenvTtsPython) -and -not $Force) {
-        Write-Ok "ya existe, se reutiliza"
-        Write-Info "usa -Force para rehacerlo desde cero"
+        Write-Ok "already there, reused"
+        Write-Info "use -Force to rebuild it from scratch"
     } else {
         if (Test-Path $VenvTts) {
-            Write-Info "borrando el anterior..."
+            Write-Info "deleting the previous one..."
             Remove-Item $VenvTts -Recurse -Force
         }
         if ((Invoke-NativeLive $python @("-m", "venv", $VenvTts)) -ne 0) {
-            Fail "no se pudo crear el entorno de voz"
+            Fail "could not create the voice environment"
         }
-        Write-Ok "creado en .venv-tts"
+        Write-Ok "created in .venv-tts"
     }
 
     if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel")) -ne 0) {
-        Fail "no se pudo actualizar pip en el entorno de voz"
+        Fail "could not upgrade pip in the voice environment"
     }
 
     $probe = Invoke-Native $VenvTtsPython @("-c", "import torch; print(torch.__version__)") -Quiet
     if ($probe.Code -eq 0 -and -not $Force) {
-        Write-Ok "torch ya instalado: $($probe.Output.Trim())"
+        Write-Ok "torch already installed: $($probe.Output.Trim())"
     } else {
-        Write-Info "descargando torch para la voz (~2,8 GB, tarda un rato)..."
+        Write-Info "downloading torch for the voice (~2.8 GB, takes a while)..."
         if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "torch", "torchaudio", "--index-url", $TorchIndex)) -ne 0) {
-            Fail "no se pudo instalar torch en el entorno de voz"
+            Fail "could not install torch in the voice environment"
         }
-        Write-Ok "torch instalado"
+        Write-Ok "torch installed"
     }
 
     $reqTts = Join-Path $Root "sidecar\requirements-tts.txt"
-    if (-not (Test-Path $reqTts)) { Fail "no encuentro $reqTts" }
+    if (-not (Test-Path $reqTts)) { Fail "can't find $reqTts" }
     if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "-r", $reqTts)) -ne 0) {
-        Fail "no se pudieron instalar las dependencias de voz"
+        Fail "could not install the voice dependencies"
     }
     # --no-deps A PROPOSITO: chatterbox-tts pina torch==2.6 y transformers
     # exactos que aqui no valen; sin esto, pip reinstalaria torch sin CUDA.
     # Sus dependencias reales ya vienen de requirements-tts.txt.
     if ((Invoke-NativeLive $VenvTtsPython @("-m", "pip", "install", "--quiet", "--no-deps", "chatterbox-tts")) -ne 0) {
-        Fail "no se pudo instalar chatterbox-tts"
+        Fail "could not install chatterbox-tts"
     }
 
     # La sonda de verdad: importar los dos motores. Instalar en limpio es
     # justo donde aparecen las dependencias que faltan en la lista.
     $engines = Invoke-Native $VenvTtsPython @("-c", "import chatterbox.mtl_tts, kokoro; print('ok')") -Quiet
     if ($engines.Code -ne 0) {
-        Fail "los motores de voz no se pueden importar; mira: $VenvTtsPython -c `"import chatterbox.mtl_tts, kokoro`""
+        Fail "the voice engines cannot be imported; look at: $VenvTtsPython -c `"import chatterbox.mtl_tts, kokoro`""
     }
-    Write-Ok "motores importables (chatterbox, kokoro)"
+    Write-Ok "engines import fine (chatterbox, kokoro)"
 
     # Los pesos multilingues de chatterbox y kokoro entero. Solo los ficheros
     # que se usan: el repo de chatterbox trae ademas los pesos solo-ingles,
     # que no tocamos. Respeta HF_HOME si se movio la cache con -ModelsDir.
-    Write-Info "descargando los modelos de voz (~4 GB la primera vez)..."
+    Write-Info "downloading the voice models (~4 GB the first time)..."
     $dlScript = @"
 from huggingface_hub import snapshot_download
 snapshot_download('ResembleAI/chatterbox', allow_patterns=[
     '*.json', '*.txt', 'conds.pt', 't3_mtl23ls_v2.safetensors', 's3gen.pt', 've.pt',
 ])
 snapshot_download('hexgrad/Kokoro-82M')
-print('modelos de voz en cache')
+print('voice models cached')
 "@
     if ((Invoke-NativeLive $VenvTtsPython @("-c", $dlScript)) -ne 0) {
-        Fail "no se pudieron descargar los modelos de voz"
+        Fail "could not download the voice models"
     }
-    Write-Ok "modelos de voz listos"
-    Write-Info "la voz se activa en la app (seccion 'Hablar por mi'); para el"
-    Write-Info "microfono virtual hace falta ademas VB-CABLE: https://vb-audio.com/Cable/"
+    Write-Ok "voice models ready"
+    Write-Info "the voice is turned on in the app (the 'Speak for me' section); for"
+    Write-Info "the virtual microphone you also need VB-CABLE: https://vb-audio.com/Cable/"
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Configuracion"
+Write-Step "Configuration"
 
 $configPath = Join-Path $Root "transcriber-config.toml"
 $outDir = Join-Path $env:USERPROFILE "Documents\LiveTranscriber"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $lines = @(
-    "# Generado por scripts\install.ps1. Se puede editar a mano o desde la app.",
+    "# Generated by scripts\install.ps1. It can be edited by hand or from the app.",
     "python = '$VenvPython'",
     'script = "sidecar/asr_server.py"',
     'mt_script = "sidecar/mt_server.py"'
@@ -437,17 +437,20 @@ $lines = @(
 if ($ModelsDir) { $lines += "hf_home = '$ModelsDir'" }
 $lines += @(
     "",
-    '# float16 en tarjetas anteriores a Ampere; bfloat16 en Ampere o superior.',
+    '# float16 on cards older than Ampere; bfloat16 on Ampere or newer.',
     "dtype = `"$dtype`"",
-    "# Idioma de la SALA: lo que suena en el sistema. Con traduccion no",
-    "# puede ser auto; se elige en la app.",
+    "# Language of the ROOM: what plays through the system. With translation",
+    "# it can NOT be auto; it is picked in the app.",
     'language = "auto"',
     "lookahead = 3",
     "",
     "translate = false",
-    "# A que se traduce la SALA (lo que suena en el sistema): el idioma en",
-    "# que lees. El microfono, si no eliges otra cosa, es el espejo: hablas",
-    "# en este idioma y se te traduce al de la sala (`language`).",
+    "# What the ROOM (what plays through the system) is translated into: the",
+    "# language you read in. The microphone, unless you pick otherwise, is",
+    "# the mirror: you speak in this language and get translated into the",
+    # Backtick doblado: en cadena de comillas dobles es el caracter de escape,
+    # asi que uno solo se lo comia PowerShell y el TOML salia sin ellos.
+    "# room's (``language``).",
     'target_language = "es-ES"',
     "",
     "capture_system = true",
@@ -465,7 +468,7 @@ $lines += @(
     "overlay_enabled = false",
     "",
     "output_dir = '$outDir'",
-    'output_name = "transcripcion"'
+    'output_name = "transcript"'
 )
 
 # La tabla [speak] va la ultima: en TOML no puede haber claves de raiz
@@ -473,9 +476,9 @@ $lines += @(
 if ($WithVoice) {
     $lines += @(
         "",
-        "# Voz sintetica: hablar tu traduccion por un microfono virtual. Se",
-        "# activa desde la app (seccion 'Hablar por mi'), donde tambien se",
-        "# elige el WAV con tu voz; sin el, chatterbox no arranca.",
+        "# Synthetic voice: speak your translation through a virtual microphone.",
+        "# It is turned on from the app (the 'Speak for me' section), where you",
+        "# also pick the WAV with your voice; without it, chatterbox won't start.",
         "[speak]",
         "enabled = false",
         'engine = "chatterbox"',
@@ -485,39 +488,39 @@ if ($WithVoice) {
 }
 
 if ((Test-Path $configPath) -and -not $Force) {
-    Write-Ok "ya existe, no se toca"
-    Write-Info "usa -Force para regenerarla con los valores detectados"
+    Write-Ok "already there, left alone"
+    Write-Info "use -Force to regenerate it with the detected values"
     if ($WithVoice) {
-        Write-Info "el interprete de voz para la app es: $VenvTtsPython"
+        Write-Info "the voice interpreter for the app is: $VenvTtsPython"
     }
 } else {
     $lines | Out-File -Encoding utf8 $configPath
-    Write-Ok "escrita transcriber-config.toml"
+    Write-Ok "wrote transcriber-config.toml"
     Write-Info "dtype = $dtype"
     Write-Info "output_dir = $outDir"
 }
 
 # ---------------------------------------------------------------------------
-Write-Step "Aplicacion"
+Write-Step "Application"
 
 if ($SkipBuild) {
-    Write-Ok "omitida (-SkipBuild)"
+    Write-Ok "skipped (-SkipBuild)"
 } else {
     $missing = @()
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $missing += "Rust (https://rustup.rs)" }
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { $missing += "Node.js (https://nodejs.org)" }
     if ($missing.Count -gt 0) {
-        Write-Warn2 "no se puede compilar, falta: $($missing -join ', ')"
-        Write-Info "el entorno de Python y los modelos ya estan listos; instala eso y vuelve a ejecutar"
+        Write-Warn2 "can't build, missing: $($missing -join ', ')"
+        Write-Info "the Python environment and the models are ready; install that and run again"
     } else {
         Push-Location $Root
         try {
             Write-Info "npm install..."
-            if ((Invoke-NativeLive "npm" @("install", "--silent")) -ne 0) { Fail "npm install fallo" }
+            if ((Invoke-NativeLive "npm" @("install", "--silent")) -ne 0) { Fail "npm install failed" }
 
-            Write-Info "compilando la aplicacion (la primera vez son varios minutos)..."
+            Write-Info "building the application (the first time takes several minutes)..."
             if ((Invoke-NativeLive "npm" @("run", "app:build")) -ne 0) {
-                Fail "la compilacion de la aplicacion fallo"
+                Fail "the application build failed"
             }
 
             # Es un workspace de Cargo, asi que `target` esta en la raiz y no
@@ -525,10 +528,10 @@ if ($SkipBuild) {
             $bundle = Join-Path $Root "target\release\bundle"
             $installers = @(Get-ChildItem $bundle -Recurse -Include *.msi, *.exe -ErrorAction SilentlyContinue)
             if ($installers.Count -gt 0) {
-                Write-Ok "instaladores generados:"
+                Write-Ok "installers generated:"
                 foreach ($f in $installers) { Write-Info $f.FullName }
             } else {
-                Write-Warn2 "compilo pero no encuentro el instalador en $bundle"
+                Write-Warn2 "it built but I can't find the installer in $bundle"
             }
         } finally {
             Pop-Location
@@ -538,31 +541,31 @@ if ($SkipBuild) {
 
 # ---------------------------------------------------------------------------
 if (-not $SkipVerify) {
-    Write-Step "Verificacion"
+    Write-Step "Verification"
     $verify = Join-Path $PSScriptRoot "verify.ps1"
     if (Test-Path $verify) {
         & $verify -Root $Root
-        if ($LASTEXITCODE -ne 0) { Fail "la verificacion no paso. Mira los mensajes de arriba." }
+        if ($LASTEXITCODE -ne 0) { Fail "verification did not pass. Look at the messages above." }
     } else {
-        Write-Warn2 "no encuentro verify.ps1"
+        Write-Warn2 "can't find verify.ps1"
     }
 }
 
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  Instalacion terminada" -ForegroundColor Green
+Write-Host "  Installation finished" -ForegroundColor Green
 if ($script:Warnings.Count -gt 0) {
     Write-Host ""
-    Write-Host "  Avisos:" -ForegroundColor Yellow
+    Write-Host "  Warnings:" -ForegroundColor Yellow
     foreach ($w in $script:Warnings) { Write-Host "   - $w" -ForegroundColor Yellow }
 }
 Write-Host ""
-Write-Host "  Arrancar en desarrollo:  npm run app:dev"
-Write-Host "  Probar sin interfaz:     cargo run -p asr-cli -- devices"
+Write-Host "  Start in development:  npm run app:dev"
+Write-Host "  Test without the UI:   cargo run -p asr-cli -- devices"
 if ($WithVoice) {
-    Write-Host "  Probar la voz:           cargo run -p asr-cli -- speak --engine kokoro --lang es --text `"hola`" --python .venv-tts\Scripts\python.exe"
+    Write-Host "  Test the voice:        cargo run -p asr-cli -- speak --engine kokoro --lang es --text `"hola`" --python .venv-tts\Scripts\python.exe"
 }
 Write-Host ""
-Write-Host "  Sube el volumen de Windows antes de probar: el bucle de retorno" -ForegroundColor DarkGray
-Write-Host "  captura despues del control de volumen." -ForegroundColor DarkGray
+Write-Host "  Turn the Windows volume up before testing: the loopback captures" -ForegroundColor DarkGray
+Write-Host "  after the volume control." -ForegroundColor DarkGray
 Write-Host ""

@@ -252,8 +252,8 @@ impl TranslationPump {
         let code = |locale: &str, papel: &str| {
             flores_code(locale).map(str::to_string).ok_or_else(|| {
                 EngineError::Spawn(format!(
-                    "no se puede traducir {papel} {locale}: elige un idioma concreto \
-                     en vez de la deteccion automatica, el traductor necesita saberlo"
+                    "cannot translate {papel} {locale}: pick a specific language \
+                     instead of automatic detection, the translator needs to know"
                 ))
             })
         };
@@ -453,7 +453,7 @@ impl MtSidecar {
 
         let mut child = command.spawn().map_err(|e| {
             EngineError::Spawn(format!(
-                "no se pudo lanzar el traductor con {}: {e}",
+                "could not launch the translator with {}: {e}",
                 cfg.python.display()
             ))
         })?;
@@ -483,7 +483,7 @@ impl MtSidecar {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(EngineError::Spawn(
-                    "el traductor no arranco a tiempo".to_string(),
+                    "the translator did not start in time".to_string(),
                 ));
             }
             match self.replies.recv_timeout(left) {
@@ -522,7 +522,7 @@ fn spawn_logger<R: Read + Send + 'static>(stderr: R) {
         .name("mt-sidecar-err".into())
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
-                tracing::info!(target: "traductor", "{line}");
+                tracing::info!(target: "translator", "{line}");
             }
         })
         .expect("spawn mt-sidecar-err");
@@ -553,7 +553,7 @@ impl Translator for MtSidecar {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(EngineError::Spawn(format!(
-                    "la traduccion {id} no llego a tiempo"
+                    "translation {id} did not arrive in time"
                 )));
             }
             match self.replies.recv_timeout(left) {

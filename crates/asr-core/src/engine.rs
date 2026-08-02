@@ -31,13 +31,13 @@ pub enum AsrEvent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("no se pudo arrancar el motor: {0}")]
+    #[error("could not start the engine: {0}")]
     Spawn(String),
 
-    #[error("el motor se cerro inesperadamente")]
+    #[error("the engine closed unexpectedly")]
     Closed,
 
-    #[error("error de E/S hablando con el motor: {0}")]
+    #[error("I/O error talking to the engine: {0}")]
     Io(#[from] std::io::Error),
 }
 

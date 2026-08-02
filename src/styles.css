@@ -38,7 +38,7 @@ body.overlay-body {
 .bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
 }
 
 .bar h1 {
@@ -289,6 +289,18 @@ ul.note li {
 .segmented button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* El hueco libre de la barra se lo come este margen, asi que el titulo y las
+   pestanas quedan a la izquierda y el idioma junto a Arrancar. */
+.lang-switch {
+  margin-left: auto;
+}
+
+.lang-switch button {
+  padding: 5px 9px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
 }
 
 .pair {

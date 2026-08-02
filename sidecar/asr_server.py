@@ -314,7 +314,7 @@ def main() -> None:
             try:
                 msg = json.loads(payload.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                emit({"t": "error", "message": f"control ilegible: {exc}"})
+                emit({"t": "error", "message": f"unreadable control frame: {exc}"})
                 continue
 
             cmd = msg.get("cmd")
@@ -331,10 +331,10 @@ def main() -> None:
             elif cmd == "shutdown":
                 break
             else:
-                emit({"t": "error", "message": f"comando desconocido: {cmd!r}"})
+                emit({"t": "error", "message": f"unknown command: {cmd!r}"})
 
         else:
-            emit({"t": "error", "message": f"tipo de frame desconocido: {frame_type}"})
+            emit({"t": "error", "message": f"unknown frame type: {frame_type}"})
 
     if session is not None:
         session.close()

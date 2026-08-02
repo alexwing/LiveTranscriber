@@ -319,8 +319,8 @@ impl SpeechPump {
             }
             if !render_alive.load(Ordering::Relaxed) {
                 let _ = self.events.send(SpeechEvent::Error {
-                    message: "la salida de audio se detuvo (¿sigue existiendo el \
-                              dispositivo?); la voz queda muda"
+                    message: "the audio output stopped (does the device still \
+                              exist?); the voice goes mute"
                         .to_string(),
                 });
                 break;
@@ -410,8 +410,8 @@ impl SpeechPump {
             Err(e @ (EngineError::Closed | EngineError::Io(_))) => {
                 tracing::error!("el sintetizador murio: {e}");
                 let _ = self.events.send(SpeechEvent::Error {
-                    message: "el sintetizador murio; la voz queda muda (el motivo \
-                              esta en el log, lineas 'sintetizador')"
+                    message: "the synthesizer died; the voice goes mute (the reason \
+                              is in the log, on the 'synthesizer' lines)"
                         .to_string(),
                 });
                 return false;
@@ -439,7 +439,7 @@ impl SpeechPump {
             // audio con la velocidad equivocada.
             let _ = self.events.send(SpeechEvent::Error {
                 message: format!(
-                    "el sintetizador cambio de frecuencia: {} -> {}",
+                    "the synthesizer changed sample rate: {} -> {}",
                     self.rate, synthesized.rate
                 ),
             });
@@ -462,8 +462,8 @@ impl SpeechPump {
         if self.render_tx.send(synthesized.samples).is_err() {
             tracing::error!("la salida de audio se cerro, parando la voz");
             let _ = self.events.send(SpeechEvent::Error {
-                message: "la salida de audio se cerro; la voz queda muda \
-                          (¿sigue existiendo el dispositivo?)"
+                message: "the audio output closed; the voice goes mute \
+                          (does the device still exist?)"
                     .to_string(),
             });
             return false;
@@ -594,7 +594,7 @@ impl TtsSidecar {
 
         let mut child = command.spawn().map_err(|e| {
             EngineError::Spawn(format!(
-                "no se pudo lanzar el sintetizador con {}: {e}",
+                "could not launch the synthesizer with {}: {e}",
                 cfg.python.display()
             ))
         })?;
@@ -625,7 +625,7 @@ impl TtsSidecar {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(EngineError::Spawn(
-                    "el sintetizador no arranco a tiempo".to_string(),
+                    "the synthesizer did not start in time".to_string(),
                 ));
             }
             match self.replies.recv_timeout(left) {
@@ -664,7 +664,7 @@ fn spawn_logger<R: Read + Send + 'static>(stderr: R) {
         .name("tts-sidecar-err".into())
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
-                tracing::info!(target: "sintetizador", "{line}");
+                tracing::info!(target: "synthesizer", "{line}");
             }
         })
         .expect("spawn tts-sidecar-err");
@@ -682,7 +682,7 @@ fn decode_pcm(b64: &str) -> Result<Vec<f32>> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
-        .map_err(|e| EngineError::Spawn(format!("PCM ilegible del sintetizador: {e}")))?;
+        .map_err(|e| EngineError::Spawn(format!("unreadable PCM from the synthesizer: {e}")))?;
     Ok(bytes
         .chunks_exact(2)
         .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0)
@@ -707,7 +707,7 @@ impl Synthesizer for TtsSidecar {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(EngineError::Spawn(format!(
-                    "la sintesis {id} no llego a tiempo"
+                    "synthesis {id} did not arrive in time"
                 )));
             }
             match self.replies.recv_timeout(left) {

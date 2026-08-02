@@ -180,14 +180,14 @@ fn require_existing(app: &AppHandle, path: &Path, what: &str) -> Result<PathBuf,
         return Ok(found);
     }
     if path.is_absolute() {
-        return Err(format!("no encuentro {what} en {}", path.display()).into());
+        return Err(format!("cannot find {what} at {}", path.display()).into());
     }
     let tried: Vec<String> = search_bases(Some(app))
         .into_iter()
         .map(|base| format!("  {}", base.join(path).display()))
         .collect();
     Err(format!(
-        "no encuentro {what} ({}). He mirado en:\n{}",
+        "cannot find {what} ({}). Looked in:\n{}",
         path.display(),
         tried.join("\n")
     )
@@ -261,7 +261,7 @@ fn profiles_file(state: &AppState) -> PathBuf {
 
 fn load_store(state: &AppState) -> Result<asr_core::ProfileStore, CmdError> {
     asr_core::ProfileStore::load(&profiles_file(state)).map_err(|e| CmdError {
-        message: format!("no se pudieron leer los perfiles: {e}"),
+        message: format!("could not read the profiles: {e}"),
     })
 }
 
@@ -276,12 +276,12 @@ fn list_profiles(state: tauri::State<'_, AppState>) -> CmdResult<Vec<String>> {
 fn save_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<Vec<String>> {
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err("el perfil necesita un nombre".to_string().into());
+        return Err("the profile needs a name".to_string().into());
     }
     let mut store = load_store(&state)?;
     store.put(&name, state.config.lock().unwrap().clone());
     store.save(&profiles_file(&state)).map_err(|e| CmdError {
-        message: format!("no se pudo guardar el perfil: {e}"),
+        message: format!("could not save the profile: {e}"),
     })?;
     Ok(store.names())
 }
@@ -297,14 +297,14 @@ fn load_profile(
     name: String,
 ) -> CmdResult<asr_core::AppliedProfile> {
     if state.running.load(Ordering::Relaxed) {
-        return Err("para cambiar de perfil hay que parar antes"
+        return Err("stop before switching profiles"
             .to_string()
             .into());
     }
     let store = load_store(&state)?;
     let profile = store
         .get(&name)
-        .ok_or_else(|| CmdError::from(format!("no existe el perfil {name:?}")))?;
+        .ok_or_else(|| CmdError::from(format!("no profile named {name:?}")))?;
 
     let applied = {
         let current = state.config.lock().unwrap();
@@ -321,10 +321,10 @@ fn load_profile(
 fn delete_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<Vec<String>> {
     let mut store = load_store(&state)?;
     if !store.remove(&name) {
-        return Err(format!("no existe el perfil {name:?}").into());
+        return Err(format!("no profile named {name:?}").into());
     }
     store.save(&profiles_file(&state)).map_err(|e| CmdError {
-        message: format!("no se pudo guardar la lista de perfiles: {e}"),
+        message: format!("could not save the profile list: {e}"),
     })?;
     Ok(store.names())
 }
@@ -404,7 +404,7 @@ async fn pick_output_dir(
     })
     .await
     .map_err(|e| CmdError {
-        message: format!("el selector de carpeta fallo: {e}"),
+        message: format!("the folder picker failed: {e}"),
     })?;
 
     let Some(picked) = picked else {
@@ -412,7 +412,7 @@ async fn pick_output_dir(
     };
     // `simplified` deja rutas de Windows normales en vez de UNC.
     let chosen = picked.simplified().into_path().map_err(|e| CmdError {
-        message: format!("ruta no utilizable: {e}"),
+        message: format!("unusable path: {e}"),
     })?;
 
     std::fs::create_dir_all(&chosen)?;
@@ -430,7 +430,7 @@ fn reveal_output_dir(state: tauri::State<'_, AppState>) -> CmdResult<()> {
         .arg(&dir)
         .spawn()
         .map_err(|e| CmdError {
-            message: format!("no se pudo abrir {}: {e}", dir.display()),
+            message: format!("could not open {}: {e}", dir.display()),
         })?;
     Ok(())
 }
@@ -454,7 +454,7 @@ fn export_transcript(state: tauri::State<'_, AppState>, format: String) -> CmdRe
 
     let transcript = state.transcript.lock().unwrap();
     if transcript.entries().is_empty() && transcript.translations().is_empty() {
-        return Err("no hay nada que exportar todavia".to_string().into());
+        return Err("nothing to export yet".to_string().into());
     }
     match format.as_str() {
         "srt" => transcript.save_srt(&path)?,
@@ -468,7 +468,7 @@ fn export_transcript(state: tauri::State<'_, AppState>, format: String) -> CmdRe
 #[tauri::command]
 fn toggle_overlay(app: AppHandle) -> CmdResult<bool> {
     let Some(window) = app.get_webview_window("overlay") else {
-        return Err("no existe la ventana de overlay".to_string().into());
+        return Err("the overlay window does not exist".to_string().into());
     };
     let visible = window.is_visible().unwrap_or(false);
     if visible {
@@ -524,7 +524,7 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     }
     if wanted.is_empty() {
         state.running.store(false, Ordering::SeqCst);
-        return Err("no hay ninguna fuente activada".to_string().into());
+        return Err("no source is enabled".to_string().into());
     }
 
     // Las validaciones de idioma van ANTES de montar nada, para que el error
@@ -534,9 +534,9 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     if config.translate {
         if config.language == "auto" {
             state.running.store(false, Ordering::SeqCst);
-            return Err("Para traducir hay que elegir un idioma concreto para la \
-                        sala en vez de la deteccion automatica: el traductor \
-                        necesita saber desde que idioma parte."
+            return Err("To translate you have to pick a specific language for the \
+                        room instead of automatic detection: the translator \
+                        needs to know which language it starts from."
                 .to_string()
                 .into());
         }
@@ -547,8 +547,8 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
         if config.capture_mic && asr_core::flores_code(&mic_lang).is_none() {
             state.running.store(false, Ordering::SeqCst);
             return Err(format!(
-                "el idioma del microfono ({mic_lang}) no es un locale valido: \
-                 eligelo en la configuracion"
+                "the microphone language ({mic_lang}) is not a valid locale: \
+                 pick it in the settings"
             )
             .into());
         }
@@ -556,9 +556,9 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
 
     if config.speak.enabled && (!config.translate || !config.capture_mic) {
         state.running.store(false, Ordering::SeqCst);
-        return Err("Hablar con tu voz necesita 'Traducir en paralelo' y \
-                    'Transcribir el microfono' activados: lo que se habla \
-                    es la traduccion de lo que dices por el micro."
+        return Err("Speaking with your voice needs 'Translate in parallel' and \
+                    'My microphone' both enabled: what gets spoken is the \
+                    translation of what you say into the mic."
             .to_string()
             .into());
     }
@@ -573,7 +573,7 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     // cuente lo que esta pasando en vez de quedarse en "Arrancando...".
     let _ = app.emit(
         "loading",
-        serde_json::json!({ "stage": "start", "message": "Cargando modelos…" }),
+        serde_json::json!({ "stage": "start", "message": "Loading models…" }),
     );
 
     let speech_handle = if config.speak.enabled {
@@ -603,15 +603,15 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
             Some(h) => match h.join() {
                 Ok(Ok(value)) => Ok(Some(value)),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(format!("el arranque de {que} entro en panico").into()),
+                Err(_) => Err(format!("starting {que} panicked").into()),
             },
         }
     }
 
     // Se recogen los dos SIEMPRE, aunque el primero falle: si no, el hilo
     // superviviente dejaria un sidecar de Python vivo agarrado a la VRAM.
-    let speech_result = join_stage(speech_handle, "la voz");
-    let translator_result = join_stage(translator_handle, "el traductor");
+    let speech_result = join_stage(speech_handle, "the voice");
+    let translator_result = join_stage(translator_handle, "the translator");
 
     let speech = match speech_result {
         Ok(s) => s,
@@ -714,7 +714,7 @@ fn start_translator(app: &AppHandle, config: &AppConfig) -> Result<MtSidecar, Cm
     );
     let _ = app.emit(
         "loading",
-        serde_json::json!({ "stage": "translator", "message": "Traductor listo" }),
+        serde_json::json!({ "stage": "translator", "message": "Translator ready" }),
     );
     Ok(sidecar)
 }
@@ -779,7 +779,7 @@ fn start_translation(
             tracing::info!("hilo de traduccion terminado");
         })
         .map_err(|e| CmdError {
-            message: format!("no se pudo lanzar el hilo de traduccion: {e}"),
+            message: format!("could not spawn the translation thread: {e}"),
         })?;
 
     Ok(tx)
@@ -798,32 +798,32 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     let voice_language = config.voice_language();
     let lang = asr_core::tts_lang_code(&voice_language).ok_or_else(|| {
         format!(
-            "no hay sintetizador para {voice_language}: chatterbox habla 23 \
-             idiomas y ese no esta entre ellos"
+            "no synthesizer for {voice_language}: chatterbox speaks 23 \
+             languages and that one is not among them"
         )
     })?;
     // Kokoro cubre menos idiomas que chatterbox; sin esto el arranque pasa
     // y cada frase de la reunion falla una a una.
     if config.speak.engine == "kokoro" && !asr_core::speak::kokoro_supports(lang) {
         return Err(format!(
-            "kokoro no tiene voces para {voice_language}: cambia al motor \
-             chatterbox o elige otro idioma para la traduccion del micro"
+            "kokoro has no voices for {voice_language}: switch to the \
+             chatterbox engine or pick another language for the mic translation"
         )
         .into());
     }
 
     let mut tts = config.tts();
-    tts.script = require_existing(app, &tts.script, "el sidecar de voz")?;
-    tts.python = require_existing(app, &tts.python, "el interprete del venv de voz")?;
+    tts.script = require_existing(app, &tts.script, "the voice sidecar")?;
+    tts.python = require_existing(app, &tts.python, "the voice venv interpreter")?;
     if tts.engine == "chatterbox" {
         let Some(wav) = tts.voice_wav.clone() else {
-            return Err("Para clonar tu voz hace falta un WAV de muestra: \
-                        graba 10-30 segundos de habla limpia y eligelo en la \
-                        configuracion, o cambia al motor kokoro (voz neutra)."
+            return Err("Cloning your voice needs a sample WAV: record 10-30 seconds \
+                        of clean speech and pick it in the settings, or switch to \
+                        the kokoro engine (neutral voice)."
                 .to_string()
                 .into());
         };
-        tts.voice_wav = Some(require_existing(app, &wav, "la muestra de voz")?);
+        tts.voice_wav = Some(require_existing(app, &wav, "the voice sample")?);
     }
 
     let sidecar = TtsSidecar::spawn(&tts)?;
@@ -832,8 +832,8 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     let ready = sidecar.wait_ready(std::time::Duration::from_secs(180)).map_err(|e| {
         CmdError {
             message: format!(
-                "el sintetizador no arranco ({e}); el motivo esta en el log, \
-                 en las lineas 'sintetizador' (¿WAV de voz ilegible? ¿venv sin \
+                "the synthesizer did not start ({e}); the reason is in the log, \
+                 on the 'synthesizer' lines (unreadable voice WAV? venv without \
                  chatterbox?)"
             ),
         }
@@ -846,7 +846,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     );
     let _ = app.emit(
         "loading",
-        serde_json::json!({ "stage": "voice", "message": "Voz lista" }),
+        serde_json::json!({ "stage": "voice", "message": "Voice ready" }),
     );
 
     // La salida de audio: para hacer de microfono virtual, el id de CABLE
@@ -872,14 +872,14 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             return Err(format!(
-                "no se pudo abrir el dispositivo de salida de la voz: {e}. \
-                 ¿Sigue existiendo? (si has reinstalado VB-CABLE, su id \
-                 cambio: vuelve a elegirlo en la configuracion)"
+                "could not open the voice output device: {e}. Does it still \
+                 exist? (if you reinstalled VB-CABLE its id changed: pick it \
+                 again in the settings)"
             )
             .into())
         }
         Err(_) => {
-            return Err("la salida de audio de la voz no respondio al abrir"
+            return Err("the voice audio output did not respond when opening"
                 .to_string()
                 .into())
         }
@@ -906,7 +906,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
             }
         })
         .map_err(|e| CmdError {
-            message: format!("no se pudo lanzar el hilo de eventos de voz: {e}"),
+            message: format!("could not spawn the speech event thread: {e}"),
         })?;
 
     let pump = SpeechPump::new(
@@ -930,7 +930,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
         .name("asr-speech".into())
         .spawn(move || pump.run(text_rx, pump_stop, render_alive))
         .map_err(|e| CmdError {
-            message: format!("no se pudo lanzar el hilo de voz: {e}"),
+            message: format!("could not spawn the speech thread: {e}"),
         })?;
 
     Ok(SpeechWiring {
@@ -1004,12 +1004,42 @@ fn spawn_event_pump(
 
 // -------------------------------------------------------- bandeja y atajos
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Mostrar / ocultar", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Arrancar / parar", true, None::<&str>)?;
-    let overlay = MenuItem::with_id(app, "overlay", "Subtitulos en pantalla", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &toggle, &overlay, &quit])?;
+/// El menu de la bandeja lo dibuja el sistema operativo, no el webview, asi
+/// que sus textos no pueden salir del catalogo de `i18n.ts`. Son cuatro: se
+/// duplican aqui y la interfaz avisa del idioma con `set_ui_language`.
+fn tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let [show, toggle, overlay, quit] = if lang == "es" {
+        [
+            "Mostrar / ocultar",
+            "Arrancar / parar",
+            "Subtitulos en pantalla",
+            "Salir",
+        ]
+    } else {
+        ["Show / hide", "Start / stop", "On-screen subtitles", "Quit"]
+    };
+    let show = MenuItem::with_id(app, "show", show, true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", toggle, true, None::<&str>)?;
+    let overlay = MenuItem::with_id(app, "overlay", overlay, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", quit, true, None::<&str>)?;
+    Menu::with_items(app, &[&show, &toggle, &overlay, &quit])
+}
+
+/// Cambia el idioma del menu de la bandeja. No devuelve error: es cosmetico y
+/// no vale la pena que un fallo aqui estropee el cambio de idioma en pantalla.
+#[tauri::command]
+fn set_ui_language(app: AppHandle, lang: String) {
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    match tray_menu(&app, &lang).and_then(|menu| tray.set_menu(Some(menu))) {
+        Ok(()) => {}
+        Err(e) => tracing::warn!("no se pudo cambiar el idioma de la bandeja: {e}"),
+    }
+}
+
+fn build_tray(app: &AppHandle, lang: &str) -> tauri::Result<()> {
+    let menu = tray_menu(app, lang)?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -1133,10 +1163,13 @@ pub fn run() {
             pick_output_dir,
             reveal_output_dir,
             toggle_overlay,
+            set_ui_language,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            build_tray(&handle)?;
+            // El idioma real lo dice la interfaz nada mas montarse; hasta
+            // entonces el menu no esta abierto, asi que este valor no se ve.
+            build_tray(&handle, "en")?;
             let config = app.state::<AppState>().config.lock().unwrap().clone();
             register_shortcuts(&handle, &config);
             if config.overlay_enabled {

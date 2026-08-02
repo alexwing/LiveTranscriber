@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Entry, SessionEvent, Source, TranslatedLine } from "./tauri";
+import { Lang, STRINGS, initialLang } from "./i18n";
 
 /** Cuantas lineas ya cerradas se mantienen en pantalla. */
 const KEEP = 2;
@@ -12,9 +13,14 @@ export default function Overlay() {
   const [recent, setRecent] = useState<string[]>([]);
   const [translated, setTranslated] = useState<string[]>([]);
   const [partials, setPartials] = useState<Partial<Record<Source, string>>>({});
+  // Webview aparte: arranca con lo que haya guardado y luego escucha los
+  // cambios que hace la ventana principal.
+  const [lang, setLang] = useState<Lang>(initialLang);
+  const t = STRINGS[lang];
 
   useEffect(() => {
     const unlisteners = [
+      listen<Lang>("ui-lang", ({ payload }) => setLang(payload)),
       listen<SessionEvent>("session-event", ({ payload }) => {
         if (payload.kind === "delta") {
           setPartials((prev) => ({
@@ -47,7 +53,7 @@ export default function Overlay() {
           e.stopPropagation();
           getCurrentWindow().hide();
         }}
-        title="Ocultar (se puede volver a abrir desde la bandeja)"
+        title={t.overlayHide}
       >
         ×
       </button>
@@ -65,7 +71,9 @@ export default function Overlay() {
             {line}
           </p>
         ))}
-        {!live && recent.length === 0 && <p className="overlay-idle">Esperando audio…</p>}
+        {!live && recent.length === 0 && (
+          <p className="overlay-idle">{t.overlayIdle}</p>
+        )}
       </div>
     </div>
   );

@@ -44,16 +44,16 @@ pub enum AudioError {
     #[error("WASAPI: {0}")]
     Wasapi(#[from] wasapi::WasapiError),
 
-    #[error("no se pudo inicializar COM en el hilo de captura: {0}")]
+    #[error("could not initialize COM on the capture thread: {0}")]
     Com(String),
 
-    #[error("no existe ningun dispositivo con id {0}")]
+    #[error("no device with id {0}")]
     DeviceNotFound(String),
 
-    #[error("no se pudo lanzar el hilo de captura: {0}")]
+    #[error("could not spawn the capture thread: {0}")]
     Thread(String),
 
-    #[error("la captura solo esta implementada en Windows")]
+    #[error("capture is only implemented on Windows")]
     UnsupportedPlatform,
 }
 

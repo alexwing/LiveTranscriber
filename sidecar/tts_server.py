@@ -390,20 +390,20 @@ def main() -> None:
             break
         frame_type, payload = frame
         if frame_type != FRAME_CONTROL:
-            emit({"t": "error", "id": 0, "message": f"tipo de frame inesperado: {frame_type}"})
+            emit({"t": "error", "id": 0, "message": f"unexpected frame type: {frame_type}"})
             continue
 
         try:
             msg = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            emit({"t": "error", "id": 0, "message": f"control ilegible: {exc}"})
+            emit({"t": "error", "id": 0, "message": f"unreadable control frame: {exc}"})
             continue
 
         cmd = msg.get("cmd")
         if cmd == "shutdown":
             break
         if cmd != "speak":
-            emit({"t": "error", "id": msg.get("id", 0), "message": f"comando desconocido: {cmd!r}"})
+            emit({"t": "error", "id": msg.get("id", 0), "message": f"unknown command: {cmd!r}"})
             continue
 
         request_id = msg.get("id", 0)

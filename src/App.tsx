@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { emit, listen } from "@tauri-apps/api/event";
 
 import {
   AppConfig,
@@ -21,11 +28,22 @@ import {
   copyText,
   formatClock,
   groupByParagraph,
-  languageName,
 } from "./tauri";
+import { Lang, LANG_NAMES, STRINGS, Strings, initialLang } from "./i18n";
 
 type Partials = Partial<Record<Source, string>>;
 type Levels = Partial<Record<Source, { rms: number; gain: number; ceiling: boolean }>>;
+
+/** Las cadenas viajan por contexto: los componentes anidan seis niveles y
+ *  pasarlas por props seria ruido en cada firma. */
+const I18n = createContext<Strings>(STRINGS.en);
+const useT = () => useContext(I18n);
+
+/** Nombre visible de un locale, en el idioma de la interfaz. */
+function langName(t: Strings, code: string): string {
+  if (code === "auto") return t.langAuto;
+  return t.langNames[code] ?? code;
+}
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -61,10 +79,25 @@ export default function App() {
   const [splitPct, setSplitPct] = useState(
     () => Number(localStorage.getItem("splitPct")) || 50
   );
+  const [lang, setLang] = useState<Lang>(initialLang);
+  const t = STRINGS[lang];
+  // Los listeners de eventos se registran UNA vez, asi que capturarian el
+  // idioma del primer render y se quedarian en el para siempre. Con una
+  // referencia leen el actual en cada evento.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => localStorage.setItem("tab", tab), [tab]);
   useEffect(() => localStorage.setItem("split", split), [split]);
   useEffect(() => localStorage.setItem("splitPct", String(splitPct)), [splitPct]);
+  // Los subtitulos viven en otra ventana, con su propio webview: no comparte
+  // este estado y no puede fiarse de `storage`, que no cruza ventanas de
+  // forma garantizada. Se le avisa por evento.
+  useEffect(() => {
+    localStorage.setItem("uiLang", lang);
+    emit("ui-lang", lang);
+    api.setUiLanguage(lang).catch(() => {});
+  }, [lang]);
 
   // Los modos disponibles dependen de la configuracion, y esta cambia al
   // aplicar un perfil: si el modo elegido deja de tener sentido (vista de
@@ -102,7 +135,11 @@ export default function App() {
         switch (payload.kind) {
           case "ready":
             setStatus(
-              `Motor listo en ${payload.device}, latencia ${payload.latency_ms} ms, idioma ${payload.language}`
+              tRef.current.engineReady(
+                payload.device,
+                payload.latency_ms,
+                langName(tRef.current, payload.language)
+              )
             );
             break;
           case "delta":
@@ -128,7 +165,7 @@ export default function App() {
             setError(payload.message);
             break;
           case "stopped":
-            setStatus("Sesion detenida");
+            setStatus(tRef.current.sessionStopped);
             break;
         }
       }),
@@ -137,17 +174,27 @@ export default function App() {
         setTranslations((t) => [...t, payload])
       ),
       listen<{ device: string; target: string }>("translator-ready", ({ payload }) =>
-        setStatus(`Traductor listo en ${payload.device}, destino ${payload.target}`)
+        setStatus(
+          tRef.current.translatorReady(payload.device, langName(tRef.current, payload.target))
+        )
       ),
       // Los modelos tardan casi un minuto en cargar y la ventana se quedaba
-      // muda todo ese rato, que se siente como que la app se ha colgado.
-      listen<{ stage: string; message: string }>("loading", ({ payload }) =>
-        setStatus(payload.message)
-      ),
+      // muda todo ese rato, que se siente como que la app se ha colgado. El
+      // texto se elige por la ETAPA y no se usa el `message` del backend:
+      // Rust no sabe en que idioma esta la ventana.
+      listen<{ stage: string; message: string }>("loading", ({ payload }) => {
+        const s = tRef.current;
+        const byStage: Record<string, string> = {
+          start: s.loadingStart,
+          voice: s.loadingVoice,
+          translator: s.loadingTranslator,
+        };
+        setStatus(byStage[payload.stage] ?? payload.message);
+      }),
       listen<SpeechEvent>("speech-event", ({ payload }) => {
         switch (payload.kind) {
           case "ready":
-            setStatus(`Voz sintetica lista en ${payload.device}`);
+            setStatus(tRef.current.voiceReady(payload.device));
             setSpeech({ pending: 0, queuedMs: 0 });
             break;
           case "queue":
@@ -209,7 +256,7 @@ export default function App() {
       if (running) {
         await api.stop();
       } else {
-        setStatus("Arrancando… cargar los modelos lleva hasta un minuto");
+        setStatus(t.starting);
         await api.start();
         setTab("transcript");
       }
@@ -223,11 +270,11 @@ export default function App() {
     try {
       const text = await api.transcriptAsText(what);
       if (!text.trim()) {
-        flash("No hay nada que copiar");
+        flash(t.nothingToCopy);
         return;
       }
       await copyText(text);
-      flash("Copiado");
+      flash(t.copied);
     } catch (e: any) {
       setError(e.message);
     }
@@ -236,7 +283,7 @@ export default function App() {
   async function doExport(format: ExportFormat) {
     try {
       const saved = await api.exportTranscript(format);
-      flash(`Guardado: ${saved}`);
+      flash(t.savedTo(saved));
     } catch (e: any) {
       setError(e.message);
     }
@@ -245,7 +292,7 @@ export default function App() {
   if (!config) {
     return (
       <main className="app">
-        <p className="muted">Cargando…</p>
+        <p className="muted">{t.appLoading}</p>
       </main>
     );
   }
@@ -298,22 +345,39 @@ export default function App() {
   const speechBehind = speech !== null && speech.queuedMs > 10_000;
 
   return (
+    <I18n.Provider value={t}>
     <main className="app">
       <header className="bar">
         <h1>LiveTranscriber</h1>
         <nav className="tabs">
           <button className={tab === "config" ? "on" : ""} onClick={() => setTab("config")}>
-            Configuracion
+            {t.tabConfig}
           </button>
           <button
             className={tab === "transcript" ? "on" : ""}
             onClick={() => setTab("transcript")}
           >
-            Transcripcion
+            {t.tabTranscript}
           </button>
         </nav>
+        {/* El idioma de la interfaz va aqui y no en la configuracion: si
+            estuviera alli entraria en los perfiles, y cambiar de perfil te
+            cambiaria el idioma de la aplicacion. Ademas se puede cambiar en
+            marcha, al reves que casi todo lo de configuracion. */}
+        <div className="segmented lang-switch" title={t.uiLanguage}>
+          {(Object.keys(LANG_NAMES) as Lang[]).map((code) => (
+            <button
+              key={code}
+              className={lang === code ? "on" : ""}
+              title={LANG_NAMES[code]}
+              onClick={() => setLang(code)}
+            >
+              {code.toUpperCase()}
+            </button>
+          ))}
+        </div>
         <button className={running ? "stop" : "start"} onClick={toggleRun}>
-          {running ? "Parar" : "Arrancar"}
+          {running ? t.stop : t.start}
         </button>
       </header>
 
@@ -323,51 +387,15 @@ export default function App() {
         </p>
       )}
       {status && !error && <p className="status">{status}</p>}
-      {autoBlocksTranslation && (
-        <p className="warn">
-          La traduccion esta activada pero el idioma es <em>Detectar automaticamente</em>.
-          El traductor necesita saber desde que idioma parte, asi que elige uno concreto.
-        </p>
-      )}
-      {lowVolume && (
-        <p className="warn">
-          El volumen de Windows esta muy bajo. El bucle de retorno captura
-          <em> despues </em> del control de volumen, asi que la transcripcion saldra
-          pobre aunque la ganancia ya este al maximo.
-        </p>
-      )}
-      {speakMisconfigured && (
-        <p className="warn">
-          Hablar con tu voz necesita <em>Traducir en paralelo</em> y{" "}
-          <em>Mi microfono</em> activados: lo que se habla es la traduccion de lo
-          que dices por el micro.
-        </p>
-      )}
-      {speakFeedbackRisk && (
-        <p className="warn">
-          Tu voz sintetica va a sonar por los <em>altavoces</em> con el
-          microfono abierto: el micro puede recogerla y volver a traducirla.
-          Ponte auriculares, o elige <code>CABLE Input</code> en{" "}
-          <em>Hablar por</em> para que solo la oiga la reunion.
-        </p>
-      )}
-      {cableLoop && (
-        <p className="warn">
-          Estas capturando del mismo cable virtual por el que habla la voz:
-          la app solo se oiria a si misma y no transcribiria nada. El cable va
-          en un solo sentido, <code>CABLE Input</code> →{" "}
-          <code>CABLE Output</code>: deja <code>CABLE Input</code> en{" "}
-          <em>Hablar por</em>, pon tu <em>microfono real</em> en Fuentes, y
-          elige <code>CABLE Output</code> como microfono <em>dentro de Teams</em>,
-          no aqui.
-        </p>
-      )}
+      {autoBlocksTranslation && <p className="warn">{t.warnAutoBlocksTranslation}</p>}
+      {lowVolume && <p className="warn">{t.warnLowVolume}</p>}
+      {speakMisconfigured && <p className="warn">{t.warnSpeakMisconfigured}</p>}
+      {speakFeedbackRisk && <p className="warn">{t.warnSpeakFeedback}</p>}
+      {cableLoop && <p className="warn">{t.warnCableLoop}</p>}
       {speech !== null && running && (
         <p className={speechBehind ? "warn" : "status"}>
-          Voz sintetica: {(speech.queuedMs / 1000).toFixed(1)} s en cola
-          {speech.pending > 0 ? ` · ${speech.pending} frases esperando` : ""}
-          {speechBehind &&
-            " — se esta generando mas despacio de lo que hablas; haz una pausa o agrupa mas caracteres"}
+          {t.speechQueue((speech.queuedMs / 1000).toFixed(1), speech.pending)}
+          {speechBehind && t.speechBehind}
         </p>
       )}
 
@@ -385,7 +413,7 @@ export default function App() {
           onSaveProfile={async (name) => {
             try {
               setProfiles(await api.saveProfile(name));
-              flash(`Perfil "${name}" guardado`);
+              flash(t.profileSaved(name));
             } catch (e: any) {
               setError(e.message);
             }
@@ -404,13 +432,17 @@ export default function App() {
               if (applied.fallbacks.length > 0) {
                 // Cambiar de dispositivo en silencio es como acabas grabando
                 // de donde no querias: se dice cual y por que.
-                const cuales = applied.fallbacks.map((f) => f.what).join(", ");
-                setError(
-                  `Perfil "${name}" aplicado, pero estos dispositivos ya no existen ` +
-                    `y han pasado al predeterminado: ${cuales}. Revisalos en Fuentes.`
-                );
+                const names: Record<string, string> = {
+                  sistema: t.deviceSystem,
+                  microfono: t.deviceMic,
+                  voz: t.deviceVoice,
+                };
+                const which = applied.fallbacks
+                  .map((f) => names[f.what] ?? f.what)
+                  .join(", ");
+                setError(t.profileFallbacks(name, which));
               } else {
-                flash(`Perfil "${name}" aplicado`);
+                flash(t.profileApplied(name));
               }
             } catch (e: any) {
               setError(e.message);
@@ -419,7 +451,7 @@ export default function App() {
           onDeleteProfile={async (name) => {
             try {
               setProfiles(await api.deleteProfile(name));
-              flash(`Perfil "${name}" borrado`);
+              flash(t.profileDeleted(name));
             } catch (e: any) {
               setError(e.message);
             }
@@ -428,7 +460,7 @@ export default function App() {
             try {
               setOutputs(await api.listDevices("output"));
               setInputs(await api.listDevices("input"));
-              flash("Dispositivos actualizados");
+              flash(t.devicesRefreshed);
             } catch (e: any) {
               setError(e.message);
             }
@@ -439,7 +471,7 @@ export default function App() {
               if (picked) {
                 setOutputDir(picked);
                 setConfig({ ...config, output_dir: picked });
-                flash("Carpeta guardada");
+                flash(t.folderSaved);
               }
             } catch (e: any) {
               setError(e.message);
@@ -464,10 +496,10 @@ export default function App() {
           splitPct={splitPct}
           setSplitPct={setSplitPct}
           voiceOn={config.speak.enabled}
-          salaName={languageName(config.language)}
-          salaTargetName={languageName(config.target_language)}
-          micName={languageName(config.mic_language || config.target_language)}
-          micTargetName={languageName(config.mic_target_language || config.language)}
+          salaName={langName(t, config.language)}
+          salaTargetName={langName(t, config.target_language)}
+          micName={langName(t, config.mic_language || config.target_language)}
+          micTargetName={langName(t, config.mic_target_language || config.language)}
           onCopyAll={copyAll}
           onExport={doExport}
           onClear={async () => {
@@ -479,16 +511,17 @@ export default function App() {
           onOverlay={() => api.toggleOverlay()}
           onCopyLine={async (text) => {
             await copyText(text);
-            flash("Copiado");
+            flash(t.copied);
           }}
         />
       )}
 
       {toast && <p className="toast">{toast}</p>}
       <footer className="hints">
-        {config.hotkey_toggle} arranca y para · {config.hotkey_overlay} muestra los subtitulos
+        {t.hints(config.hotkey_toggle, config.hotkey_overlay)}
       </footer>
     </main>
+    </I18n.Provider>
   );
 }
 
@@ -527,6 +560,7 @@ function ConfigPane({
   onPickDir: () => void;
   onRevealDir: () => void;
 }) {
+  const t = useT();
   return (
     <div className="scroll">
       <ProfilesPane
@@ -537,46 +571,34 @@ function ConfigPane({
         onDelete={onDeleteProfile}
       />
       <section className="panel">
-        <h2>Carpeta de trabajo</h2>
+        <h2>{t.outputFolder}</h2>
         <div className="path-row">
           <code className="path" title={outputDir}>
             {outputDir || "…"}
           </code>
-          <button onClick={onPickDir}>Cambiar…</button>
-          <button onClick={onRevealDir}>Abrir</button>
+          <button onClick={onPickDir}>{t.change}</button>
+          <button onClick={onRevealDir}>{t.open}</button>
         </div>
 
         <label className="field">
-          <span>Nombre del fichero</span>
+          <span>{t.fileName}</span>
           <input
             type="text"
             className="text-input"
             value={config.output_name}
-            placeholder="transcripcion"
+            placeholder={t.fileNamePlaceholder}
             onChange={(e) => patch({ output_name: e.target.value })}
           />
         </label>
-        <p className="note">
-          La fecha va delante: <code>{filenamePreview || "…"}</code>. Si ya existe
-          uno con ese nombre se añade <code>_2</code>, <code>_3</code>… en vez de
-          sobreescribirlo. Los caracteres que Windows no admite se cambian por
-          <code> _ </code>.
-        </p>
-        <p className="note">
-          La carpeta tiene que ser absoluta: una ruta relativa dependeria del
-          directorio desde el que se lanza la app, y no sabrias donde han acabado
-          los ficheros.
-        </p>
+        <p className="note">{t.outputNote1(filenamePreview || "…")}</p>
+        <p className="note">{t.outputNote2}</p>
       </section>
 
       <section className="panel">
         <div className="pane-head">
-          <h2>Fuentes</h2>
-          <button
-            title="Volver a buscar dispositivos (por ejemplo, tras enchufar unos auriculares o instalar VB-CABLE)"
-            onClick={onRefreshDevices}
-          >
-            ↻ Actualizar
+          <h2>{t.sources}</h2>
+          <button title={t.refreshTitle} onClick={onRefreshDevices}>
+            {t.refresh}
           </button>
         </div>
         <label className="row">
@@ -586,7 +608,7 @@ function ConfigPane({
             disabled={running}
             onChange={(e) => patch({ capture_system: e.target.checked })}
           />
-          <span>Audio del sistema</span>
+          <span>{t.systemAudio}</span>
           <Meter level={levels.system} />
         </label>
         <select
@@ -594,11 +616,11 @@ function ConfigPane({
           value={config.system_device_id ?? ""}
           onChange={(e) => patch({ system_device_id: e.target.value || null })}
         >
-          <option value="">Dispositivo predeterminado</option>
+          <option value="">{t.defaultDevice}</option>
           {outputs.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
-              {d.is_default ? " (predeterminado)" : ""}
+              {d.is_default ? t.defaultSuffix : ""}
             </option>
           ))}
         </select>
@@ -610,7 +632,7 @@ function ConfigPane({
             disabled={running}
             onChange={(e) => patch({ capture_mic: e.target.checked })}
           />
-          <span>Mi microfono</span>
+          <span>{t.myMic}</span>
           <Meter level={levels.mic} />
         </label>
         <select
@@ -618,28 +640,34 @@ function ConfigPane({
           value={config.mic_device_id ?? ""}
           onChange={(e) => patch({ mic_device_id: e.target.value || null })}
         >
-          <option value="">Dispositivo predeterminado</option>
+          <option value="">{t.defaultDevice}</option>
           {inputs.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
-              {d.is_default ? " (predeterminado)" : ""}
+              {d.is_default ? t.defaultSuffix : ""}
             </option>
           ))}
         </select>
       </section>
 
       <section className="panel">
-        <h2>Transcripcion</h2>
+        <h2>{t.transcription}</h2>
         <label className="field">
-          <span>Latencia</span>
+          <span>{t.latency}</span>
           <select
             disabled={running}
             value={config.lookahead}
             onChange={(e) => patch({ lookahead: Number(e.target.value) })}
           >
-            {LOOKAHEADS.map(([value, name]) => (
+            {LOOKAHEADS.map((value) => (
               <option key={value} value={value}>
-                {name}
+                {value === 0
+                  ? t.lookahead0
+                  : value === 3
+                  ? t.lookahead3
+                  : value === 6
+                  ? t.lookahead6
+                  : t.lookahead13}
               </option>
             ))}
           </select>
@@ -651,14 +679,14 @@ function ConfigPane({
             disabled={running}
             onChange={(e) => patch({ normalize_gain: e.target.checked })}
           />
-          <span>Compensar el volumen del sistema</span>
+          <span>{t.normalizeGain}</span>
         </label>
       </section>
 
       <section className="panel">
-        <h2>Parrafos</h2>
+        <h2>{t.paragraphs}</h2>
         <label className="field">
-          <span>Pausa del habla</span>
+          <span>{t.speechPause}</span>
           <select
             disabled={running}
             value={config.paragraph_idle_secs}
@@ -672,7 +700,7 @@ function ConfigPane({
           </select>
         </label>
         <label className="field">
-          <span>Parrafo maximo</span>
+          <span>{t.maxParagraph}</span>
           <select
             disabled={running}
             value={config.paragraph_max_secs}
@@ -685,28 +713,22 @@ function ConfigPane({
             ))}
           </select>
         </label>
-        <p className="note">
-          El parrafo se cierra cuando el modelo lleva ese rato sin transcribir
-          nada nuevo. Se mira el <em>texto</em>, no el volumen: con musica de
-          fondo el nivel no baja nunca, pero la musica tampoco genera
-          transcripcion. El maximo evita que un monologo sin pausas quede como un
-          bloque interminable.
-        </p>
+        <p className="note">{t.paragraphsNote}</p>
       </section>
 
       <section className="panel">
-        <h2>Idiomas</h2>
+        <h2>{t.languages}</h2>
         <div className="lang-block">
-          <h3 className="pane-title">Sala (el audio del sistema)</h3>
+          <h3 className="pane-title">{t.roomBlock}</h3>
           <div className="lang-pair">
             <select
               disabled={running}
               value={config.language}
               onChange={(e) => patch({ language: e.target.value })}
             >
-              {LANGUAGES.map(([code, name]) => (
+              {LANGUAGES.map((code) => (
                 <option key={code} value={code}>
-                  {name}
+                  {langName(t, code)}
                 </option>
               ))}
             </select>
@@ -716,29 +738,27 @@ function ConfigPane({
               value={config.target_language}
               onChange={(e) => patch({ target_language: e.target.value })}
             >
-              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+              {LANGUAGES.filter((code) => code !== "auto").map((code) => (
                 <option key={code} value={code}>
-                  {name}
+                  {langName(t, code)}
                 </option>
               ))}
             </select>
           </div>
-          <p className="note">
-            En que hablan los demas, y en que lo lees tu.
-          </p>
+          <p className="note">{t.roomNote}</p>
         </div>
 
         <div className="lang-block">
-          <h3 className="pane-title">Microfono (lo que dices tu)</h3>
+          <h3 className="pane-title">{t.micBlock}</h3>
           <div className="lang-pair">
             <select
               disabled={running || !config.translate}
               value={config.mic_language || config.target_language}
               onChange={(e) => patch({ mic_language: e.target.value })}
             >
-              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+              {LANGUAGES.filter((code) => code !== "auto").map((code) => (
                 <option key={code} value={code}>
-                  {name}
+                  {langName(t, code)}
                 </option>
               ))}
             </select>
@@ -752,21 +772,16 @@ function ConfigPane({
               onChange={(e) => patch({ mic_target_language: e.target.value })}
             >
               {config.language === "auto" && !config.mic_target_language && (
-                <option value="">(elige la sala primero)</option>
+                <option value="">{t.pickRoomFirst}</option>
               )}
-              {LANGUAGES.filter(([code]) => code !== "auto").map(([code, name]) => (
+              {LANGUAGES.filter((code) => code !== "auto").map((code) => (
                 <option key={code} value={code}>
-                  {name}
+                  {langName(t, code)}
                 </option>
               ))}
             </select>
           </div>
-          <p className="note">
-            En que hablas tu, y en que te oyen. Si la voz sintetica esta
-            activada, pronuncia el idioma de la derecha. Sin tocar nada, el
-            microfono es el espejo de la sala: hablas en el idioma en que
-            lees, y se te traduce al de la sala.
-          </p>
+          <p className="note">{t.micNote}</p>
         </div>
 
         <label className="row">
@@ -786,13 +801,9 @@ function ConfigPane({
               )
             }
           />
-          <span>Traducir en paralelo</span>
+          <span>{t.translateParallel}</span>
         </label>
-        <p className="note">
-          Sin traduccion solo se transcribe, todo en el idioma de la sala. El
-          modelo de voz no traduce: lo hace NLLB-200 despues, frase a frase.
-          Los fallos del reconocimiento se arrastran a la traduccion.
-        </p>
+        <p className="note">{t.translateNote}</p>
       </section>
 
       {config.translate && (
@@ -827,6 +838,7 @@ function ProfilesPane({
   onLoad: (name: string) => void;
   onDelete: (name: string) => void;
 }) {
+  const t = useT();
   const [selected, setSelected] = useState("");
   const [newName, setNewName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -843,7 +855,7 @@ function ProfilesPane({
 
   return (
     <section className="panel">
-      <h2>Perfiles</h2>
+      <h2>{t.profiles}</h2>
       <div className="path-row">
         <select
           disabled={running || profiles.length === 0}
@@ -851,7 +863,7 @@ function ProfilesPane({
           onChange={(e) => setSelected(e.target.value)}
         >
           <option value="">
-            {profiles.length === 0 ? "Todavia no hay perfiles" : "Elige un perfil…"}
+            {profiles.length === 0 ? t.profilesEmpty : t.profilesPick}
           </option>
           {profiles.map((name) => (
             <option key={name} value={name}>
@@ -860,7 +872,7 @@ function ProfilesPane({
           ))}
         </select>
         <button disabled={running || !selected} onClick={() => onLoad(selected)}>
-          Aplicar
+          {t.profileApply}
         </button>
         {/* Pide confirmacion: esta pegado a "Aplicar", actua sobre la misma
             seleccion, y un perfil borrado no se recupera. */}
@@ -868,9 +880,7 @@ function ProfilesPane({
           disabled={running || !selected}
           className={confirmDelete ? "danger" : ""}
           title={
-            confirmDelete
-              ? "Pulsa otra vez para borrarlo de verdad"
-              : "Borrar este perfil"
+            confirmDelete ? t.profileDeleteConfirmTitle : t.profileDeleteTitle
           }
           onClick={() => {
             if (confirmDelete) {
@@ -882,7 +892,7 @@ function ProfilesPane({
             }
           }}
         >
-          {confirmDelete ? "¿Seguro?" : "Borrar"}
+          {confirmDelete ? t.profileDeleteSure : t.profileDelete}
         </button>
       </div>
 
@@ -892,7 +902,7 @@ function ProfilesPane({
           className="text-input"
           disabled={running}
           value={newName}
-          placeholder="Nombre para guardar la configuracion actual"
+          placeholder={t.profileNamePlaceholder}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && newName.trim()) {
@@ -908,20 +918,11 @@ function ProfilesPane({
             setNewName("");
           }}
         >
-          Guardar
+          {t.profileSave}
         </button>
       </div>
-      <p className="note">
-        Un perfil guarda <em>todo</em> lo de esta pestana: idiomas, fuentes y
-        sus dispositivos, la voz, los parrafos y la carpeta de salida. Repetir
-        un nombre actualiza ese perfil con lo que tengas ahora.
-      </p>
-      <p className="note">
-        No guarda las rutas de la instalacion (el Python de los sidecars),
-        porque describen esta maquina y no como quieres usarla. Y si un
-        dispositivo guardado ya no esta —unos auriculares desenchufados, o
-        VB-CABLE desinstalado— se pasa al predeterminado y se te dice cual.
-      </p>
+      <p className="note">{t.profilesNote1}</p>
+      <p className="note">{t.profilesNote2}</p>
     </section>
   );
 }
@@ -942,6 +943,7 @@ function SpeakPane({
   patch: (c: Partial<AppConfig>) => void;
   onRefreshDevices: () => void;
 }) {
+  const t = useT();
   const speak = config.speak;
   const patchSpeak = (changes: Partial<SpeakConfig>) =>
     patch({ speak: { ...speak, ...changes } });
@@ -950,7 +952,7 @@ function SpeakPane({
 
   return (
     <section className="panel">
-      <h2>Hablar por mi</h2>
+      <h2>{t.speakTitle}</h2>
       <label className="row">
         <input
           type="checkbox"
@@ -958,38 +960,21 @@ function SpeakPane({
           disabled={running}
           onChange={(e) => patchSpeak({ enabled: e.target.checked })}
         />
-        <span>Pronunciar mi traduccion por un dispositivo de salida</span>
+        <span>{t.speakEnable}</span>
       </label>
+      <p className="note">{t.speakNote}</p>
       <p className="note">
-        Lo que dices por el microfono, ya traducido, sale hablado por el
-        dispositivo elegido. Necesita <em>Mi microfono</em> activado en
-        Fuentes.
-      </p>
-      <p className="note">
-        <strong>Como se monta con VB-CABLE.</strong> El cable va en un solo
-        sentido, <code>CABLE Input</code> → <code>CABLE Output</code>:
+        <strong>{t.speakSetupTitle}</strong> {t.speakSetupIntro}
       </p>
       <ul className="note">
-        <li>
-          Aqui, en <em>Hablar por</em>: <code>CABLE Input</code> — es donde
-          escribe la voz.
-        </li>
-        <li>
-          En Fuentes, <em>Mi microfono</em>: tu microfono <em>real</em>. Si
-          pones aqui el cable, la app solo se oye a si misma.
-        </li>
-        <li>
-          En Fuentes, <em>Audio del sistema</em>: tus altavoces o auriculares
-          — por ahi suena la reunion, que es lo que hay que transcribir.
-        </li>
-        <li>
-          <strong>Dentro de Teams</strong>, como microfono:{" "}
-          <code>CABLE Output</code>. Ese es el paso que hace que te oigan.
-        </li>
+        <li>{t.speakSetup1}</li>
+        <li>{t.speakSetup2}</li>
+        <li>{t.speakSetup3}</li>
+        <li>{t.speakSetup4}</li>
       </ul>
 
       <label className="field">
-        <span>Motor</span>
+        <span>{t.engine}</span>
         <select
           disabled={running || !speak.enabled}
           value={speak.engine}
@@ -997,34 +982,30 @@ function SpeakPane({
             patchSpeak({ engine: e.target.value as SpeakConfig["engine"] })
           }
         >
-          <option value="chatterbox">Chatterbox — mi voz clonada (23 idiomas)</option>
-          <option value="kokoro">Kokoro — voz neutra (8 idiomas, mas ligero)</option>
+          <option value="chatterbox">{t.engineChatterbox}</option>
+          <option value="kokoro">{t.engineKokoro}</option>
         </select>
       </label>
 
       {speak.engine === "chatterbox" ? (
         <>
           <label className="field">
-            <span>Muestra de mi voz</span>
+            <span>{t.voiceSample}</span>
             <input
               type="text"
               className="text-input"
               disabled={running || !speak.enabled}
               value={speak.voice_wav ?? ""}
-              placeholder={"C:\\...\\mi-voz.wav"}
+              placeholder={t.voiceWavPlaceholder}
               onChange={(e) => patchSpeak({ voice_wav: e.target.value || null })}
             />
           </label>
-          <p className="note">
-            Un WAV con 10-30 segundos de tu habla, limpia y sin ruido de fondo.
-            La voz clonada imita el tono de la muestra: si la muestra es
-            monotona, la voz tambien lo sera.
-          </p>
+          <p className="note">{t.voiceSampleNote}</p>
         </>
       ) : (
         <>
           <label className="field">
-            <span>Voz preajustada</span>
+            <span>{t.presetVoice}</span>
             <input
               type="text"
               className="text-input"
@@ -1034,42 +1015,37 @@ function SpeakPane({
               onChange={(e) => patchSpeak({ kokoro_voice: e.target.value })}
             />
           </label>
-          <p className="note">
-            El prefijo dice idioma y genero: <code>af_heart</code> (ingles, f),{" "}
-            <code>am_adam</code> (ingles, m), <code>ef_dora</code> (espanol, f),{" "}
-            <code>em_alex</code> (espanol, m)…
-          </p>
+          <p className="note">{t.presetVoiceNote}</p>
         </>
       )}
 
       <label className="field">
-        <span>Hablar por</span>
+        <span>{t.speakThrough}</span>
         <select
           disabled={running || !speak.enabled}
           value={speak.output_device_id ?? ""}
           onChange={(e) => patchSpeak({ output_device_id: e.target.value || null })}
         >
-          <option value="">Dispositivo predeterminado (los altavoces)</option>
+          <option value="">{t.defaultDeviceSpeakers}</option>
           {outputs.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
-              {d.is_default ? " (predeterminado)" : ""}
+              {d.is_default ? t.defaultSuffix : ""}
             </option>
           ))}
         </select>
       </label>
       {speak.enabled && !cable && (
         <p className="note">
-          No se ve ningun <code>CABLE Input</code>: para que la reunion te oiga
-          sin que suene por los altavoces hace falta{" "}
+          {t.noCableNote}{" "}
           <a href="https://vb-audio.com/Cable/" target="_blank" rel="noreferrer">
-            VB-CABLE
+            vb-audio.com/Cable
           </a>
-          , un dispositivo virtual que se instala aparte.{" "}
+          .{" "}
           {/* Es aqui donde se descubre que falta, asi que el refresco tiene
               que estar a mano: instalarlo con la app abierta es lo normal. */}
           <button className="link-button" onClick={onRefreshDevices}>
-            Ya lo he instalado, buscar de nuevo
+            {t.noCableRefresh}
           </button>
         </p>
       )}
@@ -1081,16 +1057,12 @@ function SpeakPane({
           disabled={running || !speak.enabled}
           onChange={(e) => patchSpeak({ mark_echo: e.target.checked })}
         />
-        <span>Reconocer mi propia voz sintetica si vuelve por el sistema</span>
+        <span>{t.markEcho}</span>
       </label>
-      <p className="note">
-        Si la reunion devuelve tu voz sintetica, la transcripcion la volveria a
-        traducir (espanol → ingles → espanol sale raro). Con esto se detecta y
-        se marca como eco en vez de re-traducirla.
-      </p>
+      <p className="note">{t.markEchoNote}</p>
 
       <label className="field">
-        <span>Agrupar frases</span>
+        <span>{t.groupSentences}</span>
         <select
           disabled={running || !speak.enabled}
           value={speak.group_max_chars}
@@ -1098,13 +1070,13 @@ function SpeakPane({
         >
           {[150, 250, 350, 500].map((v) => (
             <option key={v} value={v}>
-              {v} caracteres
+              {t.chars(v)}
             </option>
           ))}
         </select>
       </label>
       <label className="field">
-        <span>Espera maxima</span>
+        <span>{t.maxWait}</span>
         <select
           disabled={running || !speak.enabled}
           value={speak.group_max_wait_ms}
@@ -1117,12 +1089,7 @@ function SpeakPane({
           ))}
         </select>
       </label>
-      <p className="note">
-        Con la voz callada, la primera frase se pronuncia al momento. El
-        agrupado actua solo mientras suena: clonar tiene un coste fijo por
-        peticion (~1 s medido) y con frases sueltas generaria mas despacio de
-        lo que hablas; agrupando ~250 caracteres el retraso queda acotado.
-      </p>
+      <p className="note">{t.groupNote}</p>
     </section>
   );
 }
@@ -1169,6 +1136,15 @@ function TranscriptTab({
   onOverlay: () => void;
   onCopyLine: (text: string) => void;
 }) {
+  const t = useT();
+  const splitTitles: Record<Split, string> = {
+    combined: t.splitCombined,
+    "split-v": t.splitV,
+    "split-h": t.splitH,
+    "only-original": t.splitOriginal,
+    "only-translated": t.splitTranslated,
+    meeting: t.splitMeeting,
+  };
   const isSplit = split === "split-v" || split === "split-h";
   const copyWhat =
     split === "only-translated" ? "translated" : split === "only-original" ? "original" : "both";
@@ -1180,11 +1156,11 @@ function TranscriptTab({
             selector no elige nada: ocupa sitio y sugiere opciones que no hay. */}
         {splitOptions.length > 1 ? (
           <div className="segmented">
-            {SPLITS.filter(([id]) => splitOptions.includes(id)).map(([id, glyph, title]) => (
+            {SPLITS.filter(([id]) => splitOptions.includes(id)).map(([id, glyph]) => (
               <button
                 key={id}
                 className={split === id ? "on" : ""}
-                title={title}
+                title={splitTitles[id]}
                 onClick={() => setSplit(id)}
               >
                 {glyph}
@@ -1195,17 +1171,17 @@ function TranscriptTab({
           <span />
         )}
         <div className="actions">
-          <button onClick={() => onCopyAll(copyWhat)}>Copiar</button>
-          <button onClick={onOverlay}>Subtitulos</button>
+          <button onClick={() => onCopyAll(copyWhat)}>{t.copy}</button>
+          <button onClick={onOverlay}>{t.subtitles}</button>
           <button
             onClick={() => onExport(split === "only-translated" ? "translated-srt" : "srt")}
           >
             .srt
           </button>
           <button onClick={() => onExport(copyWhat === "both" ? "bilingual" : "txt")}>
-            {copyWhat === "both" ? ".txt bilingue" : ".txt"}
+            {copyWhat === "both" ? t.txtBilingual : ".txt"}
           </button>
-          <button onClick={onClear}>Limpiar</button>
+          <button onClick={onClear}>{t.clear}</button>
         </div>
       </div>
 
@@ -1223,12 +1199,12 @@ function TranscriptTab({
       ) : isSplit ? (
         <div className={`panes ${split}`}>
           <section className="pane" style={{ flexBasis: `${splitPct}%` }}>
-            <h3 className="pane-title">Original</h3>
+            <h3 className="pane-title">{t.original}</h3>
             <OriginalList entries={entries} partials={partials} onCopy={onCopyLine} />
           </section>
           <Divider vertical={split === "split-v"} onChange={setSplitPct} />
           <section className="pane">
-            <h3 className="pane-title">Traduccion</h3>
+            <h3 className="pane-title">{t.translation}</h3>
             <TranslatedList lines={translations} onCopy={onCopyLine} />
           </section>
         </div>
@@ -1278,6 +1254,7 @@ function MeetingView({
   micTargetName: string;
   onCopy: (t: string) => void;
 }) {
+  const t = useT();
   const others = groupByParagraph(translations.filter((l) => l.source === "system"));
   const mine = groupByParagraph(translations.filter((l) => l.source === "mic"));
 
@@ -1289,10 +1266,12 @@ function MeetingView({
   return (
     <div className="meeting-grid">
       <section className="pane">
-        <h3 className="pane-title">Los demas — {salaName}</h3>
+        <h3 className="pane-title">
+          {t.othersLabel} — {salaName}
+        </h3>
         <div className="scroll transcript">
           {others.length === 0 && !partials.system && (
-            <p className="muted">Nada todavia. Lo que suene en la reunion aparece aqui.</p>
+            <p className="muted">{t.emptyOthers}</p>
           )}
           {others.map((line, i) => (
             <Paragraph
@@ -1309,7 +1288,9 @@ function MeetingView({
       </section>
 
       <section className="pane">
-        <h3 className="pane-title">Los demas — {salaTargetName}</h3>
+        <h3 className="pane-title">
+          {t.othersLabel} — {salaTargetName}
+        </h3>
         <div className="scroll transcript">
           {/* Los ecos no llevan traduccion: son mi propia voz, ya en el
               idioma de la reunion, y quedan marcados en la caja original. */}
@@ -1330,7 +1311,7 @@ function MeetingView({
 
       <section className="pane">
         <h3 className="pane-title">
-          {voiceOn ? "Mi voz les dice" : "Lo mio, traducido"} — {micTargetName}
+          {voiceOn ? t.myVoiceSays : t.mineTranslated} — {micTargetName}
         </h3>
         <div className="scroll transcript">
           {/* Los ecos no se pronuncian, asi que aqui tampoco se muestran:
@@ -1351,10 +1332,12 @@ function MeetingView({
       </section>
 
       <section className="pane">
-        <h3 className="pane-title">Yo — {micName}</h3>
+        <h3 className="pane-title">
+          {t.meLabel} — {micName}
+        </h3>
         <div className="scroll transcript">
           {mine.length === 0 && !partials.mic && (
-            <p className="muted">Habla al microfono y tu texto aparece aqui.</p>
+            <p className="muted">{t.emptyMine}</p>
           )}
           {/* echo marca la propia voz sintetica captada por el micro: va en
               el idioma de la sala, no en el mio, y sin la marca pareceria
@@ -1385,11 +1368,12 @@ function OriginalList({
   partials: Partials;
   onCopy: (t: string) => void;
 }) {
+  const t = useT();
   const ref = useAutoScroll([entries, partials]);
   const empty = entries.length === 0 && !partials.system && !partials.mic;
   return (
     <div className="scroll transcript">
-      {empty && <p className="muted">Nada todavia. Dale a Arrancar y pon algo a sonar.</p>}
+      {empty && <p className="muted">{t.emptyOriginal}</p>}
       {entries.map((entry, i) => (
         <Paragraph
           key={i}
@@ -1403,7 +1387,9 @@ function OriginalList({
         (source) =>
           partials[source] && (
             <p key={source} className={`line ${source} partial`}>
-              <span className="who">{source === "system" ? "sistema" : "micro"}</span>
+              <span className="who">
+                {source === "system" ? t.whoSystem : t.whoMic}
+              </span>
               {partials[source]}
             </p>
           )
@@ -1420,15 +1406,12 @@ function TranslatedList({
   lines: TranslatedLine[];
   onCopy: (t: string) => void;
 }) {
+  const t = useT();
   const ref = useAutoScroll([lines]);
   const grouped = groupByParagraph(lines);
   return (
     <div className="scroll transcript">
-      {grouped.length === 0 && (
-        <p className="muted">
-          Todavia nada. Cada frase aparece en cuanto esta traducida.
-        </p>
-      )}
+      {grouped.length === 0 && <p className="muted">{t.emptyTranslated}</p>}
       {grouped.map((line, i) => (
         <Paragraph
           key={i}
@@ -1454,15 +1437,12 @@ function CombinedList({
   partials: Partials;
   onCopy: (t: string) => void;
 }) {
+  const t = useT();
   const ref = useAutoScroll([translations, partials]);
   const grouped = groupByParagraph(translations);
   return (
     <div className="scroll transcript">
-      {grouped.length === 0 && (
-        <p className="muted">
-          Todavia nada. Cada frase aparece en cuanto esta traducida.
-        </p>
-      )}
+      {grouped.length === 0 && <p className="muted">{t.emptyTranslated}</p>}
       {grouped.map((line, i) => (
         <div key={i} className="pair">
           <Paragraph
@@ -1481,7 +1461,9 @@ function CombinedList({
         (source) =>
           partials[source] && (
             <p key={source} className={`line ${source} partial`}>
-              <span className="who">{source === "system" ? "sistema" : "micro"}</span>
+              <span className="who">
+                {source === "system" ? t.whoSystem : t.whoMic}
+              </span>
               {partials[source]}
             </p>
           )
@@ -1547,19 +1529,22 @@ function Paragraph({
   echo?: boolean;
   onCopy: (text: string) => void;
 }) {
+  const t = useT();
   return (
     <p className={`line ${who ?? ""} ${translated ? "translated" : ""} ${echo ? "echo" : ""}`}>
       {time && <span className="time">{time}</span>}
       {echo ? (
-        <span className="who" title="Tu voz sintetica captada de vuelta por el sistema">
-          tu voz
+        <span className="who" title={t.echoTitle}>
+          {t.whoEcho}
         </span>
       ) : (
-        who && <span className="who">{who === "system" ? "sistema" : "micro"}</span>
+        who && (
+          <span className="who">{who === "system" ? t.whoSystem : t.whoMic}</span>
+        )
       )}
       {translated && !echo && <span className="arrow">→</span>}
       {text}
-      <button className="copy-line" title="Copiar este parrafo" onClick={() => onCopy(text)}>
+      <button className="copy-line" title={t.copyParagraph} onClick={() => onCopy(text)}>
         ⧉
       </button>
     </p>
@@ -1567,14 +1552,12 @@ function Paragraph({
 }
 
 function Meter({ level }: { level?: { rms: number; gain: number; ceiling: boolean } }) {
+  const t = useT();
   if (!level) return <span className="meter" />;
   const db = 20 * Math.log10(Math.max(level.rms, 1e-6));
   const pct = Math.min(100, Math.max(0, ((db + 60) / 60) * 100));
   return (
-    <span
-      className="meter"
-      title={`rms ${level.rms.toFixed(5)} · ganancia x${level.gain.toFixed(1)}`}
-    >
+    <span className="meter" title={t.meterTitle(level.rms, level.gain)}>
       <span className={`meter-fill ${level.ceiling ? "hot" : ""}`} style={{ width: `${pct}%` }} />
     </span>
   );

@@ -1,143 +1,146 @@
-# Copia esto a transcriber-config.toml. La app tambien lo escribe sola cuando
-# cambias algo en la interfaz, asi que no hace falta editarlo a mano.
+# Copy this to transcriber-config.toml. The app also writes it on its own when
+# you change something in the interface, so there is no need to edit it by hand.
 
-# Interprete con torch y transformers. Es el venv del proyecto del modelo.
+# Interpreter with torch and transformers. This is the model project's venv.
 python = 'E:\projects\nemotron-3.5-asr-streaming-0.6b\.venv\Scripts\python.exe'
 script = 'sidecar/asr_server.py'
 mt_script = 'sidecar/mt_server.py'
 
-# Traduccion en paralelo, con NLLB-200 en un segundo proceso. Cada fuente
-# lleva su par de idiomas "de -> a":
-#   sala      language        -> target_language   (lo que dicen, en que lo leo)
-#   microfono mic_language    -> mic_target_language (lo que digo, en que me oyen;
-#                                lo de la derecha es lo que pronuncia la voz)
-# Sin tocar los del micro, es el espejo de la sala: hablas en el idioma en el
-# que lees y se te traduce al de la sala. Con esto activado `language` NO
-# puede ser "auto": NLLB necesita saberlo.
+# Translation in parallel, with NLLB-200 in a second process. Each source
+# carries its own "from -> to" language pair:
+#   room language     -> target_language     (what they say, what I read it in)
+#   mic  mic_language -> mic_target_language (what I say, what they hear me in;
+#                        the one on the right is what the voice speaks)
+# Leave the mic ones alone and it is the mirror of the room: you speak in the
+# language you read in and you get translated into the room's. With this on,
+# `language` can NOT be "auto": NLLB needs to know it.
 translate = false
 
-# A que se traduce la SALA: el idioma en que lees a los demas. El nombre del
-# campo viene de cuando solo habia una direccion; se mantiene para que las
-# configuraciones existentes sigan cargando.
+# What the ROOM is translated into: the language you read everyone else in. The
+# field name comes from when there was only one direction; it stays so existing
+# configurations keep loading.
 target_language = "en-US"
 
-# Idioma de la SALA: lo que suena en el sistema. Locale concreto
-# (es-ES, en-US, fr-FR...) o "auto" para que lo detecte el modelo (solo
-# valido sin traduccion).
+# Language of the ROOM: what plays through the system. A concrete locale
+# (es-ES, en-US, fr-FR...) or "auto" so the model detects it (only valid
+# without translation).
 language = "auto"
 
-# El par del MICROFONO, solo si quieres algo distinto del espejo de la sala.
+# The MICROPHONE pair, only if you want something other than the mirror of the room.
 # mic_language = "es-ES"
 # mic_target_language = "en-US"
 
-# Solo 0, 3, 6 o 13. Son los unicos que acepta el modelo.
-#   0  -> 80 ms   minima latencia, mas errores, ~1 flujo en una 3060
-#   3  -> 320 ms  equilibrio recomendado, ~4 flujos
-#   6  -> 560 ms  mas preciso
-#   13 -> 1120 ms maxima precision
+# Only 0, 3, 6 or 13. They are the only ones the model accepts.
+#   0  -> 80 ms   lowest latency, more errors, ~1 stream on a 3060
+#   3  -> 320 ms  recommended balance, ~4 streams
+#   6  -> 560 ms  more accurate
+#   13 -> 1120 ms highest accuracy
 lookahead = 3
 
-# bfloat16 va mejor y mas rapido que float16 en este modelo.
+# bfloat16 works better and faster than float16 on this model.
 dtype = "bfloat16"
 
 capture_system = true
 capture_mic = false
 
-# null = dispositivo predeterminado. Los ids salen de `asr-cli devices`.
+# null = default device. The ids come from `asr-cli devices`.
 # system_device_id = "{0.0.0.00000000}.{...}"
 # mic_device_id = "{0.0.1.00000000}.{...}"
 
-# Cuantos dB por debajo del habla reciente cuenta como pausa. Es RELATIVO a
-# proposito: el nivel absoluto depende del volumen de Windows, la diferencia
-# entre hablar y callarse no. Menos = corta mas; mas = corta menos.
+# How many dB below recent speech counts as a pause. It is RELATIVE on purpose:
+# the absolute level depends on the Windows volume, the difference between
+# speaking and going quiet does not. Less = cuts more; more = cuts less.
 gate_drop_db = 25.0
-# Suelo absoluto, solo para que el silencio digital cuente siempre como silencio.
-# -80 deja pasar incluso el audio muy atenuado que da el loopback.
+# Absolute floor, only so that digital silence always counts as silence.
+# -80 lets through even the very attenuated audio that loopback gives.
 gate_floor_dbfs = -80.0
-# Segundos de silencio antes de dejar de alimentar al modelo. Solo afecta al
-# gasto de GPU; no decide donde acaban los parrafos.
+# Seconds of silence before it stops feeding the model. It only affects GPU
+# cost; it does not decide where paragraphs end.
 gate_hold_secs = 2.0
 
-# Los parrafos se cierran cuando el modelo lleva este rato SIN TRANSCRIBIR nada
-# nuevo. Se mira el texto y no el volumen a proposito: con musica de fondo el
-# nivel no baja nunca, pero la musica tampoco genera transcripcion.
-# Mas bajo = parrafos mas cortos y traduccion mas rapida, pero corta a mitad de
-# frase con mas facilidad.
+# Paragraphs are closed when the model has gone this long WITHOUT TRANSCRIBING
+# anything new. It looks at the text and not at the volume on purpose: with music
+# in the background the level never drops, but music does not produce transcription
+# either. Lower = shorter paragraphs and faster translation, but it cuts in the
+# middle of a sentence more easily.
 paragraph_idle_secs = 1.2
-# Tope, para que un monologo sin pausas no quede como un bloque interminable.
+# Cap, so that a monologue with no pauses does not end up as one endless block.
 paragraph_max_secs = 30.0
 
-# Compensa el volumen de Windows. Dejalo activado: el loopback captura despues
-# del control de volumen, y sin esto un volumen bajo deja la transcripcion en nada.
+# Compensates for the Windows volume. Leave it on: loopback captures after the
+# volume control, and without this a low volume leaves you no transcription.
 normalize_gain = true
 
 hotkey_toggle = "CmdOrControl+Shift+T"
 hotkey_overlay = "CmdOrControl+Shift+O"
 overlay_enabled = false
 
-# Carpeta donde se guardan los .txt y .srt exportados. Tiene que ser ABSOLUTA:
-# una relativa se resolveria contra el directorio de trabajo del proceso, que con
-# `tauri dev` es src-tauri/, y no sabrias donde han acabado los ficheros. Si aqui
-# hay una relativa se ignora y se usa Documentos\LiveTranscriber.
-# Lo normal es no tocarlo a mano: se elige desde la interfaz con "Cambiar…".
+# Folder where the exported .txt and .srt files are saved. It has to be
+# ABSOLUTE: a relative one would be resolved against the process working
+# directory, which with `tauri dev` is src-tauri/, and you would not know where
+# the files ended up. If there is a relative one here it is ignored and
+# Documents\LiveTranscriber is used. Normally you do not edit this by hand:
+# you pick it from the interface with "Change…".
 output_dir = 'C:\Users\TuUsuario\Documents\LiveTranscriber'
 
-# Nombre base del fichero. El nombre final lleva la fecha delante:
+# Base name of the file. The final name carries the date in front:
 #   2026_07_28_transcripcion.txt
 #   2026_07_28_transcripcion.srt
-#   2026_07_28_transcripcion_traducida.srt   (solo la traduccion)
-#   2026_07_28_transcripcion_bilingue.txt    (original y traduccion)
-# Si ya existe uno con ese nombre se añade _2, _3... en vez de sobreescribirlo.
-# Los caracteres que Windows no admite (\ / : * ? " < > |) se cambian por _.
+#   2026_07_28_transcripcion_traducida.srt   (translation only)
+#   2026_07_28_transcripcion_bilingue.txt    (original and translation)
+# If one with that name exists, _2, _3... is added instead of overwriting it.
+# The characters Windows does not accept (\ / : * ? " < > |) are replaced with _.
 output_name = "transcripcion"
 
-# ─── Voz sintetica ───────────────────────────────────────────────────────
-# Hablar la traduccion de lo que dices por el microfono, con tu voz clonada
-# o con una neutra. Es OPCIONAL y va en su propia seccion: apagada no cuesta
-# nada (ni proceso, ni VRAM). Exige `translate = true` y `capture_mic = true`,
-# porque lo que se pronuncia es la traduccion de tu micro. Las frases de los
-# demas se leen en pantalla, nunca se pronuncian.
+# ─── Synthetic voice ─────────────────────────────────────────────────────
+# Speak the translation of what you say into the microphone, in your cloned voice
+# or in a neutral one. It is OPTIONAL and lives in its own section: turned off it
+# costs nothing (no process, no VRAM). It requires `translate = true` and
+# `capture_mic = true`, because what gets spoken is the translation of your mic.
+# What everyone else says is read on screen, never spoken.
 #
-# El circuito del microfono virtual: la voz se escribe en CABLE Input
-# (VB-CABLE, se instala aparte) y en la reunion eliges CABLE Output como
-# microfono. Como no pasa por los altavoces, no se realimenta a la captura.
+# The virtual microphone circuit: the voice is written to CABLE Input
+# (VB-CABLE, installed separately) and in the meeting you pick CABLE Output as
+# the microphone. Since it does not go through the speakers, it does not feed
+# back into the capture.
 
 [speak]
 enabled = false
 
-# chatterbox -> tu voz clonada. 23 idiomas, ~3,4 GB de VRAM, y en una 3060 va
-#               justo en el filo de tiempo real (por eso se agrupan frases).
-# kokoro     -> voz neutra preajustada. 8 idiomas, ~0,6 GB, 40x tiempo real.
+# chatterbox -> your cloned voice. 23 languages, ~3.4 GB of VRAM, and on a 3060
+#               it sits right on the edge of real time (hence the grouping).
+# kokoro     -> preset neutral voice. 8 languages, ~0.6 GB, 40x real time.
 engine = "chatterbox"
 
-# Interprete del venv DE VOZ. No es el del ASR y no puede serlo: el ASR exige
-# transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta probado con
-# 4.57.x. Dos entornos, cada sidecar con el suyo.
+# Interpreter of the VOICE venv. It is not the ASR one and it cannot be: the ASR
+# requires transformers>=5.13 (AutoModelForRNNT) and chatterbox-tts is tested with
+# 4.57.x. Two environments, each sidecar with its own.
 python = 'E:\projects\voicebox\backend\venv\Scripts\python.exe'
 script = 'sidecar/tts_server.py'
 
-# Muestra de tu voz para clonar (solo chatterbox): WAV con 10-30 segundos de
-# habla limpia. La voz clonada imita el tono de la muestra.
+# Sample of your voice to clone (chatterbox only): a WAV with 10-30 seconds of
+# clean speech. The cloned voice imitates the tone of the sample.
 # voice_wav = 'C:\voces\mi-voz.wav'
 
-# Voz preajustada (solo kokoro). El prefijo dice idioma y genero:
-#   af_heart (ingles, f)   am_adam (ingles, m)
-#   ef_dora  (espanol, f)  em_alex (espanol, m)  em_santa (espanol, m)
+# Preset voice (kokoro only). The prefix says language and gender:
+#   af_heart (English, f)  am_adam (English, m)
+#   ef_dora  (Spanish, f)  em_alex (Spanish, m)  em_santa (Spanish, m)
 kokoro_voice = "af_heart"
 
-# Dispositivo por el que hablar. Sin esto suena por los altavoces, que casi
-# nunca es lo que se quiere: pon el id de CABLE Input (sale en `asr-cli devices`).
+# Device to speak through. Without this it comes out of the speakers, which is
+# almost never what you want: put the id of CABLE Input (from `asr-cli devices`).
 # output_device_id = "{0.0.0.00000000}.{...}"
 
-# Cuanto juntar antes de sintetizar. Chatterbox tiene ~1 s de coste fijo por
-# peticion (medido): con frases sueltas genera por debajo de tiempo real y el
-# retraso crece sin limite; con bloques de ~250 caracteres pasa de 1x y queda
-# acotado. El agrupado solo actua con la voz AUN SONANDO: callada, la primera
-# frase se sintetiza al momento y las siguientes se agrupan mientras suena.
-# La espera maxima evita que una frase corta se quede colgada en un bloque.
+# How much to bundle before synthesizing. Chatterbox has ~1 s of fixed cost per
+# request (measured): with single sentences it generates below real time and the
+# delay grows without bound; with blocks of ~250 characters it goes above 1x and
+# stays bounded. Grouping only acts while the voice is STILL PLAYING: when it is
+# silent, the first sentence is synthesized right away and the following ones are
+# grouped while it plays.
+# The maximum wait keeps a short sentence from being left hanging in a block.
 group_max_chars = 250
 group_max_wait_ms = 2000
 
-# Reconocer la propia voz sintetica si vuelve por la captura del sistema y
-# marcarla como eco en vez de re-traducirla (es -> en -> es sale raro).
+# Recognize its own synthetic voice if it comes back through the system capture and
+# mark it as echo instead of re-translating it (es -> en -> es comes out weird).
 mark_echo = true

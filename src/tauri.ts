@@ -113,13 +113,15 @@ export type Split =
   | "only-translated"
   | "meeting";
 
-export const SPLITS: Array<[Split, string, string]> = [
-  ["combined", "≡", "Combinado: la traduccion debajo de cada parrafo"],
-  ["split-v", "⬌", "Dividido vertical: uno al lado del otro"],
-  ["split-h", "⬍", "Dividido horizontal: uno encima del otro"],
-  ["only-original", "O", "Solo el original"],
-  ["only-translated", "T", "Solo la traduccion"],
-  ["meeting", "⊞", "Reunion: los demas arriba, yo abajo, un idioma por columna"],
+/** Los modos y su glifo. El texto explicativo lo pone `i18n`, para que no
+ *  haya cadenas visibles fuera del catalogo de idiomas. */
+export const SPLITS: Array<[Split, string]> = [
+  ["combined", "≡"],
+  ["split-v", "⬌"],
+  ["split-h", "⬍"],
+  ["only-original", "O"],
+  ["only-translated", "T"],
+  ["meeting", "⊞"],
 ];
 
 /** Modos de vista que tienen sentido con esta configuracion.
@@ -129,7 +131,7 @@ export const SPLITS: Array<[Split, string, string]> = [
  *  se quedaria vacia para siempre. Ofrecer modos que solo pueden salir en
  *  blanco es invitar a pensar que la app no funciona. */
 export function availableSplits(cfg: AppConfig): Split[] {
-  return SPLITS.map(([id]) => id).filter((id) => {
+  return SPLITS.map(([id]) => id).filter((id: Split) => {
     if (id === "only-original") return true;
     if (!cfg.translate) return false;
     if (id === "meeting") return cfg.capture_system && cfg.capture_mic;
@@ -137,11 +139,6 @@ export function availableSplits(cfg: AppConfig): Split[] {
   });
 }
 
-/** Nombre legible de un idioma a partir de su locale. */
-export function languageName(code: string): string {
-  const found = LANGUAGES.find(([c]) => c === code);
-  return found ? found[1] : code;
-}
 
 /** Eventos que llegan por `session-event`. */
 export type SessionEvent =
@@ -212,6 +209,9 @@ export const api = {
   pickOutputDir: () => call<string | null>("pick_output_dir"),
   revealOutputDir: () => call<void>("reveal_output_dir"),
   toggleOverlay: () => call<boolean>("toggle_overlay"),
+  /** El menu de la bandeja lo dibuja el sistema, no el webview: hay que
+   *  decirle el idioma aparte. */
+  setUiLanguage: (lang: string) => call<void>("set_ui_language", { lang }),
 };
 
 /** Copia al portapapeles con respaldo, porque el webview puede bloquear la
@@ -232,38 +232,34 @@ export async function copyText(text: string): Promise<void> {
   }
 }
 
-/** Idiomas listos para transcribir, segun el model card. */
-export const LANGUAGES: Array<[string, string]> = [
-  ["auto", "Detectar automaticamente"],
-  ["es-ES", "Espanol (Espana)"],
-  ["es-US", "Espanol (America)"],
-  ["en-US", "Ingles (EEUU)"],
-  ["en-GB", "Ingles (Reino Unido)"],
-  ["fr-FR", "Frances"],
-  ["de-DE", "Aleman"],
-  ["it-IT", "Italiano"],
-  ["pt-BR", "Portugues (Brasil)"],
-  ["pt-PT", "Portugues (Portugal)"],
-  ["nl-NL", "Neerlandes"],
-  ["tr-TR", "Turco"],
-  ["ru-RU", "Ruso"],
-  ["ar-AR", "Arabe"],
-  ["hi-IN", "Hindi"],
-  ["ja-JP", "Japones"],
-  ["ko-KR", "Coreano"],
-  ["vi-VN", "Vietnamita"],
-  ["uk-UA", "Ucraniano"],
-  ["zh-CN", "Chino mandarin"],
-  ["pl-PL", "Polaco"],
+/** Codigos de idioma listos para transcribir, segun el model card. Los
+ *  nombres visibles estan en `i18n`, traducidos. */
+export const LANGUAGES: string[] = [
+  "auto",
+  "es-ES",
+  "es-US",
+  "en-US",
+  "en-GB",
+  "fr-FR",
+  "de-DE",
+  "it-IT",
+  "pt-BR",
+  "pt-PT",
+  "nl-NL",
+  "tr-TR",
+  "ru-RU",
+  "ar-AR",
+  "hi-IN",
+  "ja-JP",
+  "ko-KR",
+  "vi-VN",
+  "uk-UA",
+  "zh-CN",
+  "pl-PL",
 ];
 
-/** Los unicos valores que acepta el modelo, con su latencia real. */
-export const LOOKAHEADS: Array<[number, string]> = [
-  [0, "80 ms - minima latencia, mas errores"],
-  [3, "320 ms - equilibrio recomendado"],
-  [6, "560 ms - mas preciso"],
-  [13, "1120 ms - maxima precision"],
-];
+/** Los unicos valores que acepta el modelo. La descripcion esta en `i18n`. */
+export const LOOKAHEADS: number[] = [0, 3, 6, 13];
 
 export function formatClock(ms: number): string {
   const total = Math.floor(ms / 1000);

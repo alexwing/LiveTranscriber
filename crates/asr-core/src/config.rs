@@ -151,7 +151,7 @@ impl Default for SpeakConfig {
 }
 
 /// Nombre a usar cuando el configurado no deja nada utilizable.
-const FALLBACK_NAME: &str = "transcripcion";
+const FALLBACK_NAME: &str = "transcript";
 
 /// Caracteres que Windows no admite en un nombre de fichero.
 const FORBIDDEN: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -246,7 +246,7 @@ impl Default for AppConfig {
             hotkey_overlay: "CmdOrControl+Shift+O".to_string(),
             overlay_enabled: false,
             output_dir: default_output_dir(),
-            output_name: "transcripcion".to_string(),
+            output_name: "transcript".to_string(),
             speak: SpeakConfig::default(),
         }
     }
@@ -333,7 +333,7 @@ impl AppConfig {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            format!("demasiados ficheros llamados {stem} en {}", dir.display()),
+            format!("too many files named {stem} in {}", dir.display()),
         ))
     }
 
@@ -463,9 +463,9 @@ mod tests {
 
     #[test]
     fn un_nombre_vacio_o_solo_simbolos_cae_al_de_reserva() {
-        assert_eq!(sanitize_file_stem(""), "transcripcion");
-        assert_eq!(sanitize_file_stem("   "), "transcripcion");
-        assert_eq!(sanitize_file_stem("///"), "transcripcion");
+        assert_eq!(sanitize_file_stem(""), "transcript");
+        assert_eq!(sanitize_file_stem("   "), "transcript");
+        assert_eq!(sanitize_file_stem("///"), "transcript");
     }
 
     #[test]

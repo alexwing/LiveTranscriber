@@ -123,7 +123,7 @@ impl PythonSidecar {
         crate::no_console(&mut command);
 
         let mut child = command.spawn().map_err(|e| {
-            EngineError::Spawn(format!("no se pudo lanzar {}: {e}", cfg.python.display()))
+            EngineError::Spawn(format!("could not launch {}: {e}", cfg.python.display()))
         })?;
 
         let stdin = child.stdin.take().ok_or(EngineError::Closed)?;

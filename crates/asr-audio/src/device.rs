@@ -71,7 +71,7 @@ fn enumerate(kind: DeviceKind) -> Result<Vec<AudioDevice>> {
         devices.push(AudioDevice {
             name: device
                 .get_friendlyname()
-                .unwrap_or_else(|_| "(sin nombre)".to_string()),
+                .unwrap_or_else(|_| "(unnamed)".to_string()),
             id,
             kind,
             is_default,

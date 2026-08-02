@@ -1,354 +1,362 @@
-# Plan: salida de voz con clonación (TTS)
+# Plan: voice output with cloning (TTS)
 
-Que lo que yo hablo en español salga por un micro virtual, en otro idioma, con mi
-propia voz. Lo que dicen los demás se sigue **leyendo** en pantalla, como ahora.
+What I say in Spanish should come out of a virtual microphone, in another
+language, in my own voice. What everyone else says is still **read** on screen,
+as it is now.
 
-Todo lo que se afirma abajo está **medido en esta máquina** (RTX 3060 12 GB,
-Windows 11) contra el backend de voicebox en `E:\projects\voicebox`, no copiado de
-documentación.
+Everything claimed below is **measured on this machine** (RTX 3060 12 GB,
+Windows 11) against the voicebox backend at `E:\projects\voicebox`, not copied
+from documentation.
 
-## Estado: implementado (fases 1-4)
+## Status: implemented (phases 1-4)
 
-Está construido y verificado hasta la fase 4. La función es **opcional entera**:
-sección `[speak]` propia en el TOML, panel "Hablar por mi" propio en la interfaz,
-y apagada no cuesta nada (ni proceso ni VRAM). Exige traducción + micro, porque
-lo que se pronuncia es la traducción del micro; las frases de los demás nunca.
+It is built and verified through phase 4. The feature is **entirely optional**:
+its own `[speak]` section in the TOML, its own "Speak for me" panel in the UI,
+and switched off it costs nothing (no process, no VRAM). It requires
+translation + microphone, because what gets spoken is the translation of the
+microphone; never other people's sentences.
 
-| pieza | dónde | verificado |
+| piece | where | verified |
 |---|---|---|
-| Salida WASAPI | `asr-audio/src/render.rs` | reproduce por el dispositivo elegido, autoconvert desde 24 kHz mono |
-| Trait + sidecar + agrupador + eco | `asr-core/src/speak.rs` | 10 tests + protocolo real |
-| Sidecar de voz | `sidecar/tts_server.py` | kokoro 103 ms en caliente; chatterbox de punta a punta |
-| Cableado + eventos | `src-tauri/src/lib.rs` | compila; cadena de apagado por canales |
-| Interfaz | `App.tsx` (SpeakPane), `tauri.ts` | tsc limpio; cola visible; eco atenuado |
-| CLI | `asr-cli speak` | **circuito completo medido**: kokoro es, 5,15 s de audio en 1.233 ms (4,18x), reproducido por WASAPI exactamente en 5,15 s |
+| WASAPI output | `asr-audio/src/render.rs` | plays through the chosen device, auto-converts from 24 kHz mono |
+| Trait + sidecar + grouper + echo | `asr-core/src/speak.rs` | 10 tests + the real protocol |
+| Voice sidecar | `sidecar/tts_server.py` | kokoro 103 ms warm; chatterbox end to end |
+| Wiring + events | `src-tauri/src/lib.rs` | compiles; shutdown chain over channels |
+| UI | `App.tsx` (SpeakPane), `tauri.ts` | tsc clean; queue visible; echo dimmed |
+| CLI | `asr-cli speak` | **full loop measured**: kokoro es, 5.15 s of audio in 1,233 ms (4.18x), played back over WASAPI in exactly 5.15 s |
 
-Tras implementar se pasó una revisión adversarial multi-agente (6 lentes +
-verificación con reproducción) y una prueba de transcripción de vuelta. Lo que
-salió y quedó arreglado: **chatterbox trunca bloques multi-frase por lotería de
-la semilla** (aislado con una matriz de 8 ejecuciones: solo la semilla importa;
-arreglado con detección por ms/carácter — completo 47,6, truncado 30,8, umbral
-38 — y reintento quedándose el audio más largo, verificado transcribiendo de
-vuelta); **la muerte del dispositivo de salida era silenciosa** (ahora hay
-handshake de arranque que hace fallar el arranque con mensaje claro, y la bomba
-avisa con error si el render muere a mitad); **"Parar" no callaba la voz**
-(ahora hay asidero de parada: lo pendiente se descarta al parar, y se evita
-superponer dos sintetizadores en un parar-y-arrancar rápido); el **eco se
-comprueba en ambas fuentes** (por el micro también: si la voz suena por
-altavoces, el micro la recoge y sin esto se re-hablaría a sí misma en bucle);
-más validación del WAV de referencia al arrancar, detección de audio NaN,
-precalentamiento de la voz de kokoro, y el `.gitignore` que se tragaba
-`requirements-tts.txt`.
+After implementing, it went through an adversarial multi-agent review (6 lenses +
+verification by reproduction) and a transcribe-back test. What came out of it
+and got fixed: **chatterbox truncates multi-sentence blocks on a seed lottery**
+(isolated with a matrix of 8 runs: only the seed matters; fixed with detection
+by ms per character — complete 47.6, truncated 30.8, threshold 38 — and a retry
+that keeps the longer audio, verified by transcribing it back); **the death of
+the output device was silent** (there is now a startup handshake that fails
+startup with a clear message, and the pump reports an error if the render dies
+halfway through); **"Stop" did not silence the voice** (there is now a stop
+handle: whatever is pending is dropped on stop, and overlapping two synthesizers
+on a fast stop-and-start is avoided); **echo is checked on both sources** (on
+the microphone too: if the voice plays through speakers, the mic picks it up and
+without this it would speak itself back in a loop); plus more validation of the
+reference WAV at startup, NaN audio detection, warm-up of the kokoro voice, and
+the `.gitignore` that was swallowing `requirements-tts.txt`.
 
-Tres cosas que salieron al probar de verdad, ninguna estaba en el plan:
+Three things that turned up when actually testing it, none of them in the plan:
 
-1. **numba/SVML mata el proceso** también aquí (el `LLVM ERROR: __svml_cosf8_ha`
-   de esta máquina): `prepare_conditionals` pasa por librosa. El sidecar se
-   blinda solo (`NUMBA_DISABLE_INTEL_SVML=1` antes de los imports), porque no
-   puede depender del entorno de quien lo lance.
-2. **Chatterbox imprime a stdout durante `generate`** (`loaded PerthNet...`), y
-   una línea suelta rompía el protocolo de una-línea-JSON. El sidecar duplica el
-   stdout real para el protocolo y redirige el fd 1 a stderr: ningún print de
-   ninguna librería puede volver a tocarlo.
-3. **Sin el parche de atención `eager`** el analizador de alineación de
-   chatterbox se queda sin pesos (sdpa ignora `output_attentions`) y el proceso
-   unas veces genera y otras muere sin traceback. Es el mismo parche que aplica
-   voicebox; reproducido y aplicado.
+1. **numba/SVML kills the process** here too (this machine's
+   `LLVM ERROR: __svml_cosf8_ha`): `prepare_conditionals` goes through librosa.
+   The sidecar shields itself (`NUMBA_DISABLE_INTEL_SVML=1` before the imports),
+   because it cannot depend on the environment of whoever launches it.
+2. **Chatterbox prints to stdout during `generate`** (`loaded PerthNet...`), and
+   one stray line broke the one-JSON-line protocol. The sidecar duplicates the
+   real stdout for the protocol and redirects fd 1 to stderr: no print from any
+   library can ever touch it again.
+3. **Without the `eager` attention patch** chatterbox's alignment analyzer is
+   left with no weights (sdpa ignores `output_attentions`) and the process
+   sometimes generates and sometimes dies with no traceback. It is the same
+   patch voicebox applies; reproduced and applied.
 
-**El circuito del micrófono virtual está verificado de punta a punta** con
-VB-CABLE instalado (Pack 45, firma de Vincent Burel comprobada): la voz clonada
-entró por `CABLE Input` y el propio ASR de Nemotron, escuchando `CABLE Output`,
-la transcribió **palabra por palabra, puntuación incluida** (8,36 s de audio a
-RTFx 1,00x). Es decir: lo que oiría Teams es exactamente lo que se dijo.
+**The virtual microphone loop is verified end to end** with VB-CABLE installed
+(Pack 45, Vincent Burel's signature checked): the cloned voice went in through
+`CABLE Input` and Nemotron's own ASR, listening on `CABLE Output`, transcribed
+it **word for word, punctuation included** (8.36 s of audio at RTFx 1.00x).
+That is: what Teams would hear is exactly what was said.
 
-Esa prueba destapó además la **causa raíz del truncado**, que no era solo
-lotería: en `alignment_stream_analyzer.py` de chatterbox el corte por
-"repetición excesiva de tokens" dice en su comentario *3x same token in a row*
-pero el código mira solo los DOS últimos, y la guarda `self.complete and` está
-comentada en la propia librería. Dos tokens de silencio idénticos —una pausa
-entre frases— decapitan el audio en mitad de la generación. Un texto con la
-primera frase corta moría 3 de 3 veces en el mismo sitio. `tts_server.py` lo
-neutraliza recortando la ventana de tokens antes de cada paso (los detectores
-de alineación buenos siguen activos), y el reintento por ms/carácter queda como
-red. Ojo: **voicebox tiene el mismo bug latente** en sus generaciones largas.
+That test also uncovered the **root cause of the truncation**, which was not
+just a lottery: in chatterbox's `alignment_stream_analyzer.py` the cutoff for
+"excessive token repetition" says *3x same token in a row* in its comment, but
+the code looks at only the LAST TWO, and the `self.complete and` guard is
+commented out in the library itself. Two identical silence tokens — a pause
+between sentences — decapitate the audio mid-generation. A text with a short
+first sentence died 3 out of 3 times in the same place. `tts_server.py`
+neutralizes it by trimming the token window before each step (the good alignment
+detectors stay active), and the ms-per-character retry stays as a net. Note:
+**voicebox has the same latent bug** in its long generations.
 
-Pendiente (fase 5): `install.ps1` con el segundo venv (`requirements-tts.txt` ya
-existe y documenta por qué no cabe en el venv del ASR), `verify.ps1` e
-`INSTALL.md`. Y la prueba social: una reunión real de Teams con `CABLE Output`
-como micrófono.
+Pending (phase 5): `install.ps1` with the second venv (`requirements-tts.txt`
+already exists and documents why it does not fit in the ASR venv), `verify.ps1`
+and `INSTALL.md`. And the social test: a real Teams meeting with `CABLE Output`
+as the microphone.
 
-## Qué motor y por qué
+## Which engine, and why
 
-Medido con un backend recién arrancado por motor (para que ninguno herede la VRAM
-del anterior), texto de una frase (83 caracteres), `seed=1234`, 1 calentamiento y
-3 medidas. Se da el mejor tiempo en caliente.
+Measured with a freshly started backend per engine (so that none inherits the
+previous one's VRAM), a one-sentence text (83 characters), `seed=1234`, 1
+warm-up and 3 measurements. The best warm time is given.
 
-| motor | idioma | cold | warm | audio | RTFx | VRAM | idiomas | licencia |
+| engine | language | cold | warm | audio | RTFx | VRAM | languages | license |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| Kokoro 82M | en | 6.723 ms | 115 ms | 5,35 s | 46,6x | 559 MB | 8 | Apache 2.0 |
-| Kokoro 82M | es | 5.815 ms | 111 ms | 5,30 s | 47,9x | 557 MB | 8 | Apache 2.0 |
-| **Chatterbox ML** | en | 21.180 ms | 4.435 ms | 3,74 s | 0,84x | 3.400 MB | **23** | **MIT** |
-| **Chatterbox ML** | es | 21.694 ms | 4.565 ms | 4,24 s | 0,93x | 3.399 MB | **23** | **MIT** |
-| **Chatterbox ML** | de | 20.940 ms | 4.606 ms | 4,46 s | 0,97x | 3.399 MB | **23** | **MIT** |
-| Qwen 1.7B | en | 23.837 ms | 11.382 ms | 5,12 s | 0,45x | 4.046 MB | 10 | — |
-| Qwen 1.7B | es | 23.038 ms | 12.618 ms | 5,68 s | 0,45x | 4.046 MB | 10 | — |
+| Kokoro 82M | en | 6,723 ms | 115 ms | 5.35 s | 46.6x | 559 MB | 8 | Apache 2.0 |
+| Kokoro 82M | es | 5,815 ms | 111 ms | 5.30 s | 47.9x | 557 MB | 8 | Apache 2.0 |
+| **Chatterbox ML** | en | 21,180 ms | 4,435 ms | 3.74 s | 0.84x | 3,400 MB | **23** | **MIT** |
+| **Chatterbox ML** | es | 21,694 ms | 4,565 ms | 4.24 s | 0.93x | 3,399 MB | **23** | **MIT** |
+| **Chatterbox ML** | de | 20,940 ms | 4,606 ms | 4.46 s | 0.97x | 3,399 MB | **23** | **MIT** |
+| Qwen 1.7B | en | 23,837 ms | 11,382 ms | 5.12 s | 0.45x | 4,046 MB | 10 | — |
+| Qwen 1.7B | es | 23,038 ms | 12,618 ms | 5.68 s | 0.45x | 4,046 MB | 10 | — |
 
-**Con clonación → Chatterbox Multilingual.** Gana a Qwen en las tres dimensiones a
-la vez: 2,7x más rápido, más ligero y con más del doble de idiomas. Y cubre
-alemán, ruso y coreano, que a Kokoro le faltan — que es lo que hace viable poder
-cambiar de idioma destino más adelante.
+**With cloning → Chatterbox Multilingual.** It beats Qwen on all three
+dimensions at once: 2.7x faster, lighter, and with more than twice the
+languages. And it covers German, Russian and Korean, which Kokoro lacks — which
+is what makes it viable to change the target language later on.
 
-**Sin clonación → Kokoro 82M.** 111 ms y 47,9x. Queda como modo alternativo
-(voz neutra) y como red de seguridad si Chatterbox no da el ritmo.
+**Without cloning → Kokoro 82M.** 111 ms and 47.9x. It stays as an alternative
+mode (neutral voice) and as a safety net if Chatterbox cannot keep pace.
 
-LuxTTS y Chatterbox Turbo quedaron descartados: son **solo inglés**, y eso choca
-con el requisito de cambiar de idioma. LuxTTS era el más rápido con clonación
-(301 ms, 13x), así que si alguna vez el inglés se congela como único destino,
-merece revisarlo.
+LuxTTS and Chatterbox Turbo were ruled out: they are **English only**, and that
+clashes with the requirement to change language. LuxTTS was the fastest with
+cloning (301 ms, 13x), so if English ever gets locked in as the only target, it
+is worth revisiting.
 
-## El dato que condiciona el diseño: RTFx > 1
+## The number that shapes the design: RTFx > 1
 
-Para habla sostenida lo que decide no es la latencia, es si RTFx supera 1. Por
-debajo, generas más despacio de lo que se reproduce y **el retardo crece sin
-estabilizarse** mientras sigas hablando. Por encima, el desfase queda acotado a
-una frase.
+For sustained speech what decides it is not latency, it is whether RTFx
+clears 1. Below it, you generate more slowly than it plays back and **the
+delay grows without settling** for as long as you keep talking. Above it,
+the lag stays bounded to one sentence.
 
-Chatterbox está justo en el filo (0,84–0,97x por frase corta), pero con texto
-largo (330 caracteres) sube a **1,02–1,03x**. Ajustando el coste sobre el par de
-inglés (3,74 s y 15,9 s de audio generado):
+Chatterbox sits right on the edge (0.84–0.97x on a short sentence), but with a
+long text (330 characters) it rises to **1.02–1.03x**. Fitting the cost over the
+English pair (3.74 s and 15.9 s of generated audio):
 
-- **coste fijo por llamada ≈ 1 s**
-- **RTFx marginal ≈ 1,09x**
+- **fixed cost per call ≈ 1 s**
+- **marginal RTFx ≈ 1.09x**
 
-El ajuste predice el alemán largo con 0,1 s de error (17,2 s frente a 17,1 s
-medidos) y falla ~0,5 s en los cortos, así que es aproximado. Pero deja claro
-dónde está el problema: **el 0,84x de las frases cortas es casi todo ese segundo
-fijo.**
+The fit predicts the long German case to within 0.1 s (17.2 s against 17.1 s
+measured) and is off by ~0.5 s on the short ones, so it is approximate. But it
+makes clear where the problem is: **the 0.84x of the short sentences is almost
+entirely that fixed second.**
 
-### De dónde sale ese segundo (medido)
+### Where that second comes from (measured)
 
-En voicebox, `chatterbox_backend.py` guarda el prompt de voz como una simple ruta
-y devuelve `False` (no cacheado), y luego pasa `audio_prompt_path=ref_audio` a
-`model.generate()` **en cada llamada**, así que Chatterbox re-codifica el audio de
-referencia en cada frase.
+In voicebox, `chatterbox_backend.py` stores the voice prompt as a plain path and
+returns `False` (not cached), and then passes `audio_prompt_path=ref_audio` to
+`model.generate()` **on every call**, so Chatterbox re-encodes the reference
+audio on every sentence.
 
-Se midió si evitarlo recupera el coste fijo, llamando al modelo directamente con
-el WAV de referencia real, misma semilla y mismos parámetros que usa el backend:
+To measure whether avoiding it recovers the fixed cost, the model was called
+directly with the real reference WAV, the same seed and the same parameters the
+backend uses:
 
-| estrategia | por frase | audio | RTFx |
+| strategy | per sentence | audio | RTFx |
 |---|---:|---:|---:|
-| `audio_prompt_path` en cada llamada | 4.015 ms | 3,88 s | 0,97x |
-| `prepare_conditionals()` una vez | **3.771 ms** | 3,88 s | **1,03x** |
+| `audio_prompt_path` on every call | 4,015 ms | 3.88 s | 0.97x |
+| `prepare_conditionals()` once | **3,771 ms** | 3.88 s | **1.03x** |
 
-**El ahorro es de 244 ms (6%), no del segundo entero que sugería el ajuste.** La
-re-codificación del prompt de voz cuesta ~0,24 s; el resto del coste fijo está en
-el arranque del decodificador autorregresivo y el códec, y no se quita cacheando
-nada.
+**The saving is 244 ms (6%), not the whole second the fit suggested.**
+Re-encoding the voice prompt costs ~0.24 s; the rest of the fixed cost is in the
+startup of the autoregressive decoder and the codec, and no caching removes it.
 
-Aun así merece la pena hacerlo: es **una sola llamada al arrancar** y cruza el
-umbral de 1,0x, que es justo el signo que decide si el retardo se acota o crece.
+Even so it is worth doing: it is **a single call at startup** and it crosses the
+1.0x threshold, which is exactly the sign that decides whether the delay stays
+bounded or grows.
 
-Segundo hallazgo de la misma medida: la API directa da **4.015 ms** frente a los
-**4.435 ms** de voicebox por HTTP. Esos ~420 ms son su capa (normalizado, cadena
-de efectos, codificación WAV, transporte HTTP). Sumado al cacheo, **nuestro propio
-sidecar rinde ~15% mejor** que llamar a voicebox: 3.771 ms frente a 4.435 ms. Es
-el argumento cuantitativo para la fase 2 y contra quedarse en el sondeo HTTP.
+Second finding from the same measurement: the direct API gives **4,015 ms**
+against voicebox's **4,435 ms** over HTTP. Those ~420 ms are its layer
+(normalization, effects chain, WAV encoding, HTTP transport). Together with the
+caching, **our own sidecar performs ~15% better** than calling voicebox:
+3,771 ms against 4,435 ms. That is the quantitative argument for phase 2 and
+against staying on the HTTP probe.
 
-Nota de robustez observada durante la prueba: Chatterbox emitió
-`Detected 2x repetition of token` y forzó EOS. Voicebox tiene un detector de
-descarrilamiento (`engine_retries_runaway`) precisamente para esto; nuestro
-sidecar necesita algo equivalente o alguna frase saldrá cortada.
+Robustness note observed during the test: Chatterbox emitted
+`Detected 2x repetition of token` and forced EOS. Voicebox has a runaway
+detector (`engine_retries_runaway`) precisely for this; our sidecar needs
+something equivalent or some sentence will come out cut short.
 
-## Arquitectura
+## Architecture
 
-Misma forma que ya usamos: la lógica en crates independientes de Tauri, y el
-motor detrás de un trait para poder cambiarlo sin que nada más se entere.
-
-```
-crates/asr-core/src/tts.rs           trait TtsEngine + TtsEvent + TtsError   (espejo de engine.rs)
-crates/asr-core/src/tts_sidecar.rs   PythonTtsSidecar                        (espejo de sidecar.rs)
-crates/asr-core/src/speech_out.rs    agrupador + cola ordenada + reproducción
-crates/asr-audio/src/render.rs       salida WASAPI a un dispositivo concreto  (NUEVO)
-sidecar/tts_server.py                el motor (Chatterbox | Kokoro)          (espejo de mt_server.py)
-src-tauri/src/lib.rs                 comandos y eventos
-```
-
-`asr-audio` hoy **solo captura**. Sacar audio a un dispositivo elegido es
-capacidad nueva, y es la única pieza sin precedente en el repo.
-
-### Protocolo del sidecar
-
-Mismo marco que `mt_server.py`: `u32 longitud | u8 tipo | payload`, tipo `0x02`
-control JSON, una línea JSON por respuesta en stdout, y el `id` viajando de vuelta
-para emparejar sin asumir orden.
+Same shape we already use: the logic in crates that are independent of Tauri,
+and the engine behind a trait so it can be swapped without anything else
+noticing.
 
 ```
-stdin  (tipo 0x02, JSON utf-8)
+crates/asr-core/src/tts.rs           trait TtsEngine + TtsEvent + TtsError   (mirror of engine.rs)
+crates/asr-core/src/tts_sidecar.rs   PythonTtsSidecar                        (mirror of sidecar.rs)
+crates/asr-core/src/speech_out.rs    grouper + ordered queue + playback
+crates/asr-audio/src/render.rs       WASAPI output to a specific device      (NEW)
+sidecar/tts_server.py                the engine (Chatterbox | Kokoro)        (mirror of mt_server.py)
+src-tauri/src/lib.rs                 commands and events
+```
+
+`asr-audio` today **only captures**. Getting audio out to a chosen device is a
+new capability, and it is the only piece with no precedent in the repo.
+
+### The sidecar protocol
+
+Same frame as `mt_server.py`: `u32 length | u8 type | payload`, type `0x02` JSON
+control, one JSON line per response on stdout, and the `id` traveling back so
+they can be paired without assuming order.
+
+```
+stdin  (type 0x02, JSON utf-8)
     {"cmd":"speak","id":12,"text":"...","lang":"en","voice":"clone"}
     {"cmd":"shutdown"}
 
-stdout (una línea JSON por mensaje)
+stdout (one JSON line per message)
     {"t":"ready","device":"cuda","engine":"chatterbox","dtype":"float16","rate":24000}
     {"t":"audio","id":12,"pcm":"<base64 i16 LE mono>","rate":24000,"ms":4560}
     {"t":"error","id":12,"message":"..."}
 ```
 
-La única diferencia real con traducción es que la respuesta es audio. Va en
-**base64 de PCM i16** dentro de la línea JSON, en vez de bytes crudos, para no
-romper el protocolo de líneas y poder reutilizar el lector de `sidecar.rs`. Coste:
-una frase de 4 s a 24 kHz i16 son 192 KB, 256 KB en base64 — despreciable al lado
-de los 4,5 s que tarda en generarse. Si algún día molesta, se añade un tipo de
-frame binario en stdout.
+The only real difference from translation is that the response is audio. It goes
+as **base64 of PCM i16** inside the JSON line, instead of raw bytes, so as not
+to break the line protocol and to be able to reuse the reader in `sidecar.rs`.
+Cost: a 4 s sentence at 24 kHz i16 is 192 KB, 256 KB in base64 — negligible next
+to the 4.5 s it takes to generate. If it ever becomes a nuisance, a binary frame
+type gets added on stdout.
 
-`pick_dtype` se copia tal cual de `mt_server.py`: el problema de bfloat16 emulado
-en Turing es el mismo aquí.
+`pick_dtype` is copied as-is from `mt_server.py`: the problem of emulated
+bfloat16 on Turing is the same here.
 
-### Dónde engancha en el pipeline
+### Where it hooks into the pipeline
 
-`SentenceSplitter::push` (`translate.rs`) ya devuelve frases cerradas, y
-`TranslatedSentence` ya lleva su `paragraph`. **El TTS se engancha al evento de
-frase traducida, no al cierre de párrafo** — es exactamente la lección que ya
-está documentada en el README para la traducción, y aquí el coste de equivocarse
-es peor: los demás esperarían `paragraph_idle_secs` enteros antes de oírte.
+`SentenceSplitter::push` (`translate.rs`) already returns closed sentences, and
+`TranslatedSentence` already carries its `paragraph`. **TTS hooks into the
+translated-sentence event, not the paragraph close** — it is exactly the lesson
+already documented in the README for translation, and here the cost of getting
+it wrong is worse: the others would wait a whole `paragraph_idle_secs` before
+hearing you.
 
-Flujo completo de salida:
+The full output flow:
 
 ```
-micro → gate → ASR → SentenceSplitter → NLLB (es→destino) → agrupador → TTS → cola ordenada → render → CABLE Input
+mic → gate → ASR → SentenceSplitter → NLLB (es→target) → grouper → TTS → ordered queue → render → CABLE Input
 ```
 
-### El agrupador
+### The grouper
 
-Consecuencia directa del coste fijo por llamada. Acumula frases traducidas y
-suelta el bloque cuando se cumple lo primero de:
+A direct consequence of the fixed cost per call. It accumulates translated
+sentences and releases the block on whichever comes first:
 
-- **N caracteres** acumulados (~250–300, donde ya se midió >1x), o
-- **T ms** desde la primera frase pendiente (para que una frase suelta no se
-  quede esperando).
+- **N characters** accumulated (~250–300, where >1x was already measured), or
+- **T ms** since the first pending sentence (so that a lone sentence is not left
+  waiting).
 
-Ambos configurables. Así se consigue RTFx > 1 sin latencia sin cota. Si la
-hipótesis de `prepare_conditionals` se confirma, N puede bajar mucho o el
-agrupador quedarse en `N=1`.
+Both configurable. That is how RTFx > 1 is reached without unbounded latency. If
+the `prepare_conditionals` hypothesis is confirmed, N can drop a lot or the
+grouper can stay at `N=1`.
 
-### Orden de reproducción
+### Playback order
 
-Las frases deben sonar en orden aunque la generación termine desordenada. El `id`
-ya vuelve del sidecar, así que un búfer de reordenación indexado por `id` resuelve
-el caso.
+Sentences must play in order even if generation finishes out of order. The `id`
+already comes back from the sidecar, so a reorder buffer indexed by `id` solves
+the case.
 
-## Micro virtual
+## Virtual microphone
 
-**En Windows no se puede crear un dispositivo de entrada de audio desde código de
-usuario.** Hace falta un driver de kernel firmado; no se resuelve desde Rust.
+**On Windows you cannot create an audio input device from user code.** It takes
+a signed kernel driver; it is not solvable from Rust.
 
-La vía práctica es **VB-CABLE**: instala un par de dispositivos, `CABLE Input`
-(reproducción) y `CABLE Output` (grabación). Nosotros renderizamos a `CABLE
-Input`; en Teams el usuario elige `CABLE Output` como micrófono.
+The practical route is **VB-CABLE**: it installs a pair of devices, `CABLE
+Input` (playback) and `CABLE Output` (recording). We render to `CABLE Input`; in
+Teams the user picks `CABLE Output` as the microphone.
 
-Tres consecuencias:
+Three consequences:
 
-1. **Elimina el riesgo de realimentación.** El TTS nunca toca los altavoces, así
-   que la captura por loopback no lo recoge. No hace falta el filtrado por PID
-   para esto.
-2. **Conviene fijar el formato del cable a 24 kHz mono**, que es lo que sacan
-   Chatterbox y Kokoro, para que Windows no remuestree por su cuenta.
-3. **Lo instala el usuario aparte** y tiene su propia licencia. El instalador debe
-   detectar su ausencia y decirlo claro, no fallar de forma opaca.
+1. **It removes the feedback risk.** The TTS never touches the speakers, so
+   loopback capture does not pick it up. Per-PID filtering is not needed for
+   this.
+2. **The cable format should be pinned to 24 kHz mono**, which is what
+   Chatterbox and Kokoro put out, so that Windows does not resample on its own.
+3. **The user installs it separately** and it has its own license. The installer
+   must detect its absence and say so clearly, not fail opaquely.
 
-## Ciclo de vida del proceso: el Job Object
+## Process lifetime: the Job Object
 
-Midiendo esto apareció un proceso huérfano de `multiprocessing.spawn` que
-sobrevivió a su backend **reteniendo 11,6 GB de VRAM**: matarlo bajó la GPU de
-12.045 a 447 MiB. Usaba además el Python del sistema, no el del venv, así que no
-aparece donde lo buscarías.
+While measuring this, an orphaned `multiprocessing.spawn` process turned up that
+had outlived its backend **holding 11.6 GB of VRAM**: killing it took the GPU
+from 12,045 down to 447 MiB. It was also running the system Python, not the
+venv's, so it does not show up where you would look for it.
 
-Un `taskkill` al PID padre **no basta**. El sidecar debe lanzarse dentro de un
-**Job Object** con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`CreateJobObjectW` +
-`SetInformationJobObject` + `AssignProcessToJobObject`), que mata el árbol
-completo incluidos los hijos de `multiprocessing`. Sin eso, un cierre sucio deja
-la tarjeta inutilizable hasta reiniciar.
+A `taskkill` on the parent PID **is not enough**. The sidecar has to be launched
+inside a **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+(`CreateJobObjectW` + `SetInformationJobObject` + `AssignProcessToJobObject`),
+which kills the whole tree including the `multiprocessing` children. Without
+that, a dirty shutdown leaves the card unusable until you reboot.
 
-Aplica igual al sidecar de ASR y al de traducción que ya existen.
+This applies just the same to the ASR and translation sidecars that already
+exist.
 
-## Presupuesto de VRAM
+## VRAM budget
 
-| componente | VRAM |
+| component | VRAM |
 |---|---:|
-| ASR Nemotron | 2,40 GB |
-| NLLB-200 | 1,27 GB |
-| Chatterbox ML | 3,40 GB |
-| Kokoro (si se carga a la vez) | 0,56 GB |
-| escritorio | ~0,87 GB |
-| **total con Chatterbox** | **~7,9 GB** |
-| **total con las dos** | **~8,5 GB** |
+| ASR Nemotron | 2.40 GB |
+| NLLB-200 | 1.27 GB |
+| Chatterbox ML | 3.40 GB |
+| Kokoro (if loaded at the same time) | 0.56 GB |
+| desktop | ~0.87 GB |
+| **total with Chatterbox** | **~7.9 GB** |
+| **total with both** | **~8.5 GB** |
 
-Cabe en los 12 GB con margen. Se pueden tener las dos vías cargadas sin descargar
-y recargar modelos.
+It fits in the 12 GB with room to spare. Both paths can be kept loaded without
+unloading and reloading models.
 
-## Arranque en frío
+## Cold start
 
-Chatterbox tarda **21 s** en cargar. Hay que precargarlo al iniciar la app, detrás
-de un estado visible de "preparando voz", nunca en la primera frase. Kokoro son
+Chatterbox takes **21 s** to load. It has to be preloaded when the app starts,
+behind a visible "preparing voice" state, never on the first sentence. Kokoro is
 ~6 s.
 
-## Fases
+## Phases
 
-Cada fase termina en algo verificable sin la siguiente.
+Each phase ends in something verifiable without the next one.
 
-**Fase 0 — sondeo, sin escribir sidecar.** Validar calidad y latencia llamando al
-backend de voicebox por HTTP (`POST /generate/stream`, puerto 17493). Barato y
-responde la única pregunta que ningún número resuelve: si la voz clonada convence.
-*Hecho en parte: hay muestras generadas en español, inglés y alemán.*
+**Phase 0 — probe, without writing a sidecar.** Validate quality and latency by
+calling the voicebox backend over HTTP (`POST /generate/stream`, port 17493).
+Cheap, and it answers the one question no number settles: whether the cloned
+voice is convincing. *Partly done: there are samples generated in Spanish,
+English and German.*
 
-**Fase 1 — `asr-audio::render`.** Salida WASAPI a un dispositivo por nombre, más
-un comando de `asr-cli` que reproduzca un `.wav` en él. Verificable sin ningún
-modelo: si suena en `CABLE Input` y Teams lo oye por `CABLE Output`, la fase está
-cerrada.
+**Phase 1 — `asr-audio::render`.** WASAPI output to a device by name, plus an
+`asr-cli` command that plays a `.wav` on it. Verifiable with no model at all: if
+it plays on `CABLE Input` and Teams hears it through `CABLE Output`, the phase
+is closed.
 
-**Fase 2 — `tts_server.py` + `PythonTtsSidecar`.** `prepare_conditionals()` una
-sola vez al arrancar (ya medido: 244 ms por frase y cruza 1,0x) y detector de
-descarrilamiento. Comando `asr-cli speak --text ... --lang en`. El sidecar propio
-se justifica solo: ~15% más rápido que ir por HTTP a voicebox.
+**Phase 2 — `tts_server.py` + `PythonTtsSidecar`.** `prepare_conditionals()`
+once only, at startup (already measured: 244 ms per sentence and it crosses
+1.0x) and a runaway detector. Command `asr-cli speak --text ... --lang en`. Our
+own sidecar pays for itself: ~15% faster than going to voicebox over HTTP.
 
-**Fase 3 — cableado del pipeline.** Agrupador, cola ordenada y enganche al evento
-de frase traducida en `session.rs`. Verificable con el CLI de punta a punta:
-hablar al micro y que salga por el cable en otro idioma.
+**Phase 3 — wiring the pipeline.** Grouper, ordered queue and the hook into the
+translated-sentence event in `session.rs`. Verifiable end to end with the CLI:
+speak into the mic and have it come out of the cable in another language.
 
-**Fase 4 — Tauri y interfaz.** Comandos y eventos; selector de motor
-(Chatterbox/Kokoro), de voz, de dispositivo de salida, e interruptor. Mostrar
-**profundidad de la cola**, que es la señal de que te estás quedando atrás.
+**Phase 4 — Tauri and UI.** Commands and events; selector for engine
+(Chatterbox/Kokoro), for voice, for output device, and a switch. Show the
+**queue depth**, which is the signal that you are falling behind.
 
-**Fase 5 — instalador.** Dependencias del nuevo sidecar en `install.ps1`,
-precomprobación de modelos, y detección de VB-CABLE con mensaje claro si falta.
-Cuidado con lo ya aprendido: `$ErrorActionPreference = "Stop"` mata estos scripts,
-y hay que declarar el sidecar nuevo como recurso en `tauri.conf.json` o el `.msi`
-saldrá sin él.
+**Phase 5 — installer.** The new sidecar's dependencies in `install.ps1`, a
+model pre-check, and VB-CABLE detection with a clear message if it is missing.
+Mind what was already learned: `$ErrorActionPreference = "Stop"` kills these
+scripts, and the new sidecar has to be declared as a resource in
+`tauri.conf.json` or the `.msi` will ship without it.
 
-## Riesgos
+## Risks
 
-- **RTFx marginal.** 0,84–1,03x deja poco margen. Si en uso real se queda corto,
-  las salidas son el agrupador, `prepare_conditionals`, o caer a Kokoro avisando.
-- **Esto es interpretación con retardo, no simultánea.** Con la cascada completa
-  pasan varios segundos desde que cierras una frase hasta que te oyen. La interfaz
-  debe hacerlo evidente en vez de parecer que se ha colgado.
-- **Todo el audio de Chatterbox lleva la marca de agua Perth de Resemble AI**,
-  imperceptible pero presente. No es un impedimento; conviene saberlo.
-- **NLLB sigue siendo el único bloqueo comercial** (CC-BY-NC-4.0). El TTS elegido
-  no añade ninguno: Chatterbox es MIT y Kokoro Apache 2.0.
-- **Errores en cascada.** Si el ASR oye mal, la traducción propaga y ahora además
-  se pronuncia con tu voz. El listado en pantalla de lo que se ha dicho en tu
-  nombre pasa a ser una función, no un lujo.
+- **Marginal RTFx.** 0.84–1.03x leaves little room. If it falls short in real
+  use, the ways out are the grouper, `prepare_conditionals`, or dropping to
+  Kokoro with a warning.
+- **This is delayed interpreting, not simultaneous.** With the full cascade,
+  several seconds pass between closing a sentence and being heard. The UI has to
+  make that evident instead of looking like it has hung.
+- **All Chatterbox audio carries Resemble AI's Perth watermark**, imperceptible
+  but present. It is not an impediment; it is worth knowing.
+- **NLLB is still the only commercial blocker** (CC-BY-NC-4.0). The chosen TTS
+  adds none: Chatterbox is MIT and Kokoro Apache 2.0.
+- **Cascading errors.** If the ASR mishears, translation propagates it and now
+  it is also spoken in your voice. Listing on screen what has been said in your
+  name becomes a feature, not a luxury.
 
-## Sin verificar
+## Unverified
 
-- Chatterbox **con el ASR corriendo a la vez**. Todas mis medidas son del TTS
-  solo; la contienda por GPU podría empeorarlas. Es el riesgo abierto más
-  relevante, porque el margen sobre 1,0x es de un 3%.
-- **TADA 3B** (10 idiomas, con clonación) quedó sin medir: son 8 GB y Chatterbox
-  ya cubre 23 idiomas.
-- El comportamiento del **agrupador** con frases reales de conversación, que son
-  más cortas e irregulares que el texto de prueba.
+- Chatterbox **with the ASR running at the same time**. All my measurements are
+  of the TTS alone; contention for the GPU could make them worse. It is the most
+  relevant open risk, because the margin over 1.0x is 3%.
+- **TADA 3B** (10 languages, with cloning) was left unmeasured: it is 8 GB and
+  Chatterbox already covers 23 languages.
+- The behavior of the **grouper** with real conversational sentences, which are
+  shorter and more irregular than the test text.
 
-Ya verificado y por tanto fuera de esta lista: la **calidad de la voz clonada**
-(aprobada escuchando muestras en español, inglés y alemán) y el efecto de
-**`prepare_conditionals`** (244 ms, tabla arriba).
+Already verified and therefore off this list: the **quality of the cloned voice**
+(approved by listening to samples in Spanish, English and German) and the effect
+of **`prepare_conditionals`** (244 ms, table above).

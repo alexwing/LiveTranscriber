@@ -247,6 +247,88 @@ fn list_devices(kind: DeviceKind) -> CmdResult<Vec<AudioDevice>> {
     Ok(asr_audio::list_devices(kind)?)
 }
 
+// ---------------------------------------------------------------- perfiles
+//
+// Las combinaciones utiles son muchas (una reunion en ingles hablando con tu
+// voz, transcribir una charla en espanol, subtitular una pelicula...) y
+// rehacerlas a mano cada vez es tedioso. Ver `asr_core::profiles` para las
+// dos decisiones de diseno: viven en su propio fichero, y no se llevan las
+// rutas de la instalacion.
+
+fn profiles_file(state: &AppState) -> PathBuf {
+    asr_core::profiles_path(&state.config_path)
+}
+
+fn load_store(state: &AppState) -> Result<asr_core::ProfileStore, CmdError> {
+    asr_core::ProfileStore::load(&profiles_file(state)).map_err(|e| CmdError {
+        message: format!("no se pudieron leer los perfiles: {e}"),
+    })
+}
+
+#[tauri::command]
+fn list_profiles(state: tauri::State<'_, AppState>) -> CmdResult<Vec<String>> {
+    Ok(load_store(&state)?.names())
+}
+
+/// Guarda la configuracion actual con un nombre. Repetir nombre actualiza,
+/// que es lo que se espera al volver a guardar sobre un perfil.
+#[tauri::command]
+fn save_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<Vec<String>> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("el perfil necesita un nombre".to_string().into());
+    }
+    let mut store = load_store(&state)?;
+    store.put(&name, state.config.lock().unwrap().clone());
+    store.save(&profiles_file(&state)).map_err(|e| CmdError {
+        message: format!("no se pudo guardar el perfil: {e}"),
+    })?;
+    Ok(store.names())
+}
+
+/// Aplica un perfil: lo deja como configuracion actual y lo persiste.
+///
+/// Devuelve tambien que dispositivos del perfil ya no existen y han caido al
+/// predeterminado, para que la interfaz pueda decirlo en vez de cambiarlos
+/// en silencio.
+#[tauri::command]
+fn load_profile(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> CmdResult<asr_core::AppliedProfile> {
+    if state.running.load(Ordering::Relaxed) {
+        return Err("para cambiar de perfil hay que parar antes"
+            .to_string()
+            .into());
+    }
+    let store = load_store(&state)?;
+    let profile = store
+        .get(&name)
+        .ok_or_else(|| CmdError::from(format!("no existe el perfil {name:?}")))?;
+
+    let applied = {
+        let current = state.config.lock().unwrap();
+        asr_core::profiles::apply(&profile.config, &current, &asr_core::DeviceIds::from_system())
+    };
+
+    applied.config.save(&state.config_path)?;
+    *state.config.lock().unwrap() = applied.config.clone();
+    tracing::info!("perfil {name:?} aplicado");
+    Ok(applied)
+}
+
+#[tauri::command]
+fn delete_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<Vec<String>> {
+    let mut store = load_store(&state)?;
+    if !store.remove(&name) {
+        return Err(format!("no existe el perfil {name:?}").into());
+    }
+    store.save(&profiles_file(&state)).map_err(|e| CmdError {
+        message: format!("no se pudo guardar la lista de perfiles: {e}"),
+    })?;
+    Ok(store.names())
+}
+
 #[tauri::command]
 fn is_running(state: tauri::State<'_, AppState>) -> bool {
     tracing::debug!("is_running");
@@ -1034,6 +1116,10 @@ pub fn run() {
             get_config,
             save_config,
             list_devices,
+            list_profiles,
+            save_profile,
+            load_profile,
+            delete_profile,
             is_running,
             start_transcription,
             stop_transcription,

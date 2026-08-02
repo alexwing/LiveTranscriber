@@ -17,6 +17,7 @@ import {
   Tab,
   TranslatedLine,
   api,
+  availableSplits,
   copyText,
   formatClock,
   groupByParagraph,
@@ -45,6 +46,7 @@ export default function App() {
   /// Ruta efectiva que devuelve Rust, que puede no ser la del TOML si la
   /// configurada era relativa.
   const [outputDir, setOutputDir] = useState("");
+  const [profiles, setProfiles] = useState<string[]>([]);
   /// Nombre que tendria el fichero. Lo calcula Rust para no duplicar aqui las
   /// reglas de fecha y saneado.
   const [filenamePreview, setFilenamePreview] = useState("");
@@ -64,6 +66,19 @@ export default function App() {
   useEffect(() => localStorage.setItem("split", split), [split]);
   useEffect(() => localStorage.setItem("splitPct", String(splitPct)), [splitPct]);
 
+  // Los modos disponibles dependen de la configuracion, y esta cambia al
+  // aplicar un perfil: si el modo elegido deja de tener sentido (vista de
+  // reunion en un perfil sin traduccion) hay que enseñar otro, o el usuario
+  // se queda mirando cajas vacias sin saber por que.
+  //
+  // El modo efectivo se CALCULA, no se guarda: `split` conserva siempre lo
+  // que tu elegiste. Si se corrigiera el estado, la correccion se
+  // persistiria encima de tu preferencia y al volver a activar la traduccion
+  // ya no habria nada que restaurar — la habrias perdido para siempre.
+  const splitOptions = config ? availableSplits(config) : [];
+  const effectiveSplit =
+    splitOptions.length === 0 || splitOptions.includes(split) ? split : splitOptions[0];
+
   useEffect(() => {
     (async () => {
       try {
@@ -74,6 +89,7 @@ export default function App() {
         setEntries(await api.getTranscript());
         setTranslations(await api.getTranslations());
         setOutputDir(await api.outputDir());
+        setProfiles(await api.listProfiles());
       } catch (e: any) {
         setError(e.message);
       }
@@ -247,6 +263,37 @@ export default function App() {
     config.speak.enabled &&
     config.capture_mic &&
     config.speak.output_device_id === null;
+
+  // Capturar del mismo cable virtual por el que habla la voz es un lazo
+  // cerrado: la app solo se oye a si misma, y como nadie mete audio en el
+  // cable hasta que la voz hable --y la voz no habla hasta transcribir
+  // algo-- se queda en silencio para siempre. Es facil de hacer sin querer,
+  // porque los dos extremos del cable se llaman casi igual.
+  const nameOf = (list: AudioDevice[], id: string | null) =>
+    (id && list.find((d) => d.id === id)?.name) || "";
+  // Un extremo de cable virtual se reconoce por "CABLE Input/Output" seguido
+  // del fabricante entre parentesis. Se compara el fabricante para exigir que
+  // sean los dos extremos del MISMO cable: buscar solo "cable" en el nombre
+  // daba falsos positivos con cualquier auricular que lleve esa palabra.
+  const cableEnd = (name: string) => {
+    const m = /^\s*cable\s+(input|output)\b\s*(.*)$/i.exec(name);
+    return m ? { dir: m[1].toLowerCase(), family: m[2].trim().toLowerCase() } : null;
+  };
+  const voiceEnd = cableEnd(nameOf(outputs, config.speak.output_device_id));
+  const sameCableAsVoice = (name: string) => {
+    const end = cableEnd(name);
+    return (
+      !!voiceEnd &&
+      voiceEnd.dir === "input" &&
+      !!end &&
+      end.dir === "output" &&
+      end.family === voiceEnd.family
+    );
+  };
+  const cableLoop =
+    config.speak.enabled &&
+    ((config.capture_mic && sameCableAsVoice(nameOf(inputs, config.mic_device_id))) ||
+      (config.capture_system && sameCableAsVoice(nameOf(outputs, config.system_device_id))));
   // Con mas de ~10 s de retraso la conversacion deja de ser conversacion.
   const speechBehind = speech !== null && speech.queuedMs > 10_000;
 
@@ -304,6 +351,17 @@ export default function App() {
           <em>Hablar por</em> para que solo la oiga la reunion.
         </p>
       )}
+      {cableLoop && (
+        <p className="warn">
+          Estas capturando del mismo cable virtual por el que habla la voz:
+          la app solo se oiria a si misma y no transcribiria nada. El cable va
+          en un solo sentido, <code>CABLE Input</code> →{" "}
+          <code>CABLE Output</code>: deja <code>CABLE Input</code> en{" "}
+          <em>Hablar por</em>, pon tu <em>microfono real</em> en Fuentes, y
+          elige <code>CABLE Output</code> como microfono <em>dentro de Teams</em>,
+          no aqui.
+        </p>
+      )}
       {speech !== null && running && (
         <p className={speechBehind ? "warn" : "status"}>
           Voz sintetica: {(speech.queuedMs / 1000).toFixed(1)} s en cola
@@ -323,6 +381,49 @@ export default function App() {
           patch={patch}
           outputDir={outputDir}
           filenamePreview={filenamePreview}
+          profiles={profiles}
+          onSaveProfile={async (name) => {
+            try {
+              setProfiles(await api.saveProfile(name));
+              flash(`Perfil "${name}" guardado`);
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }}
+          onLoadProfile={async (name) => {
+            try {
+              const applied = await api.loadProfile(name);
+              setConfig(applied.config);
+              setOutputDir(await api.outputDir());
+              // El perfil puede traer dispositivos que no estaban en la
+              // lista que se cargo al abrir la app. Sin releerla, el
+              // selector mostraria el nombre equivocado y los avisos que
+              // miran nombres (el del lazo de cable) no se dispararian.
+              setOutputs(await api.listDevices("output"));
+              setInputs(await api.listDevices("input"));
+              if (applied.fallbacks.length > 0) {
+                // Cambiar de dispositivo en silencio es como acabas grabando
+                // de donde no querias: se dice cual y por que.
+                const cuales = applied.fallbacks.map((f) => f.what).join(", ");
+                setError(
+                  `Perfil "${name}" aplicado, pero estos dispositivos ya no existen ` +
+                    `y han pasado al predeterminado: ${cuales}. Revisalos en Fuentes.`
+                );
+              } else {
+                flash(`Perfil "${name}" aplicado`);
+              }
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }}
+          onDeleteProfile={async (name) => {
+            try {
+              setProfiles(await api.deleteProfile(name));
+              flash(`Perfil "${name}" borrado`);
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }}
           onRefreshDevices={async () => {
             try {
               setOutputs(await api.listDevices("output"));
@@ -357,11 +458,12 @@ export default function App() {
           entries={entries}
           translations={translations}
           partials={partials}
-          split={split}
+          split={effectiveSplit}
           setSplit={setSplit}
+          splitOptions={splitOptions}
           splitPct={splitPct}
           setSplitPct={setSplitPct}
-          translateOn={config.translate}
+          voiceOn={config.speak.enabled}
           salaName={languageName(config.language)}
           salaTargetName={languageName(config.target_language)}
           micName={languageName(config.mic_language || config.target_language)}
@@ -401,6 +503,10 @@ function ConfigPane({
   patch,
   outputDir,
   filenamePreview,
+  profiles,
+  onSaveProfile,
+  onLoadProfile,
+  onDeleteProfile,
   onRefreshDevices,
   onPickDir,
   onRevealDir,
@@ -413,12 +519,23 @@ function ConfigPane({
   patch: (c: Partial<AppConfig>) => void;
   outputDir: string;
   filenamePreview: string;
+  profiles: string[];
+  onSaveProfile: (name: string) => void;
+  onLoadProfile: (name: string) => void;
+  onDeleteProfile: (name: string) => void;
   onRefreshDevices: () => void;
   onPickDir: () => void;
   onRevealDir: () => void;
 }) {
   return (
     <div className="scroll">
+      <ProfilesPane
+        profiles={profiles}
+        running={running}
+        onSave={onSaveProfile}
+        onLoad={onLoadProfile}
+        onDelete={onDeleteProfile}
+      />
       <section className="panel">
         <h2>Carpeta de trabajo</h2>
         <div className="path-row">
@@ -691,6 +808,124 @@ function ConfigPane({
   );
 }
 
+/// Perfiles con nombre: guardan la configuracion entera de un uso concreto
+/// (una reunion en ingles hablando con tu voz, transcribir una charla, ...)
+/// para no rehacerla a mano cada vez.
+///
+/// Va la primera de la pestana a proposito: lo habitual es elegir perfil y no
+/// tocar nada mas.
+function ProfilesPane({
+  profiles,
+  running,
+  onSave,
+  onLoad,
+  onDelete,
+}: {
+  profiles: string[];
+  running: boolean;
+  onSave: (name: string) => void;
+  onLoad: (name: string) => void;
+  onDelete: (name: string) => void;
+}) {
+  const [selected, setSelected] = useState("");
+  const [newName, setNewName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Si el perfil elegido desaparece (lo has borrado), no dejar el selector
+  // apuntando a un fantasma.
+  useEffect(() => {
+    if (selected && !profiles.includes(selected)) setSelected("");
+  }, [profiles, selected]);
+
+  // Cambiar de perfil cancela un borrado a medias: si no, el "¿Seguro?"
+  // seguiria armado apuntando ya a otro.
+  useEffect(() => setConfirmDelete(false), [selected]);
+
+  return (
+    <section className="panel">
+      <h2>Perfiles</h2>
+      <div className="path-row">
+        <select
+          disabled={running || profiles.length === 0}
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+        >
+          <option value="">
+            {profiles.length === 0 ? "Todavia no hay perfiles" : "Elige un perfil…"}
+          </option>
+          {profiles.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <button disabled={running || !selected} onClick={() => onLoad(selected)}>
+          Aplicar
+        </button>
+        {/* Pide confirmacion: esta pegado a "Aplicar", actua sobre la misma
+            seleccion, y un perfil borrado no se recupera. */}
+        <button
+          disabled={running || !selected}
+          className={confirmDelete ? "danger" : ""}
+          title={
+            confirmDelete
+              ? "Pulsa otra vez para borrarlo de verdad"
+              : "Borrar este perfil"
+          }
+          onClick={() => {
+            if (confirmDelete) {
+              onDelete(selected);
+              setConfirmDelete(false);
+            } else {
+              setConfirmDelete(true);
+              window.setTimeout(() => setConfirmDelete(false), 4000);
+            }
+          }}
+        >
+          {confirmDelete ? "¿Seguro?" : "Borrar"}
+        </button>
+      </div>
+
+      <div className="path-row">
+        <input
+          type="text"
+          className="text-input"
+          disabled={running}
+          value={newName}
+          placeholder="Nombre para guardar la configuracion actual"
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && newName.trim()) {
+              onSave(newName.trim());
+              setNewName("");
+            }
+          }}
+        />
+        <button
+          disabled={running || !newName.trim()}
+          onClick={() => {
+            onSave(newName.trim());
+            setNewName("");
+          }}
+        >
+          Guardar
+        </button>
+      </div>
+      <p className="note">
+        Un perfil guarda <em>todo</em> lo de esta pestana: idiomas, fuentes y
+        sus dispositivos, la voz, los parrafos y la carpeta de salida. Repetir
+        un nombre actualiza ese perfil con lo que tengas ahora.
+      </p>
+      <p className="note">
+        No guarda las rutas de la instalacion (el Python de los sidecars),
+        porque describen esta maquina y no como quieres usarla. Y si un
+        dispositivo guardado ya no esta —unos auriculares desenchufados, o
+        VB-CABLE desinstalado— se pasa al predeterminado y se te dice cual.
+      </p>
+    </section>
+  );
+}
+
 /// Seccion de la voz sintetica. Es una funcion opcional entera: se activa
 /// aqui, independiente del resto, y apagada no cuesta nada (ni proceso ni
 /// VRAM). Habla SOLO la traduccion de lo que dices por el microfono.
@@ -727,10 +962,31 @@ function SpeakPane({
       </label>
       <p className="note">
         Lo que dices por el microfono, ya traducido, sale hablado por el
-        dispositivo elegido. Con VB-CABLE como dispositivo y{" "}
-        <code>CABLE Output</code> como microfono de la reunion, los demas te
-        oyen en su idioma. Necesita <em>Mi microfono</em> activado en Fuentes.
+        dispositivo elegido. Necesita <em>Mi microfono</em> activado en
+        Fuentes.
       </p>
+      <p className="note">
+        <strong>Como se monta con VB-CABLE.</strong> El cable va en un solo
+        sentido, <code>CABLE Input</code> → <code>CABLE Output</code>:
+      </p>
+      <ul className="note">
+        <li>
+          Aqui, en <em>Hablar por</em>: <code>CABLE Input</code> — es donde
+          escribe la voz.
+        </li>
+        <li>
+          En Fuentes, <em>Mi microfono</em>: tu microfono <em>real</em>. Si
+          pones aqui el cable, la app solo se oye a si misma.
+        </li>
+        <li>
+          En Fuentes, <em>Audio del sistema</em>: tus altavoces o auriculares
+          — por ahi suena la reunion, que es lo que hay que transcribir.
+        </li>
+        <li>
+          <strong>Dentro de Teams</strong>, como microfono:{" "}
+          <code>CABLE Output</code>. Ese es el paso que hace que te oigan.
+        </li>
+      </ul>
 
       <label className="field">
         <span>Motor</span>
@@ -879,9 +1135,10 @@ function TranscriptTab({
   partials,
   split,
   setSplit,
+  splitOptions,
   splitPct,
   setSplitPct,
-  translateOn,
+  voiceOn,
   salaName,
   salaTargetName,
   micName,
@@ -897,9 +1154,11 @@ function TranscriptTab({
   partials: Partials;
   split: Split;
   setSplit: (s: Split) => void;
+  /** Modos que tienen sentido con la configuracion actual. */
+  splitOptions: Split[];
   splitPct: number;
   setSplitPct: (n: number) => void;
-  translateOn: boolean;
+  voiceOn: boolean;
   salaName: string;
   salaTargetName: string;
   micName: string;
@@ -917,19 +1176,24 @@ function TranscriptTab({
   return (
     <>
       <div className="pane-head">
-        <div className="segmented">
-          {SPLITS.map(([id, glyph, title]) => (
-            <button
-              key={id}
-              className={split === id ? "on" : ""}
-              title={title}
-              disabled={!translateOn && id !== "only-original"}
-              onClick={() => setSplit(id)}
-            >
-              {glyph}
-            </button>
-          ))}
-        </div>
+        {/* Con un solo modo posible (sin traduccion solo cabe el original) el
+            selector no elige nada: ocupa sitio y sugiere opciones que no hay. */}
+        {splitOptions.length > 1 ? (
+          <div className="segmented">
+            {SPLITS.filter(([id]) => splitOptions.includes(id)).map(([id, glyph, title]) => (
+              <button
+                key={id}
+                className={split === id ? "on" : ""}
+                title={title}
+                onClick={() => setSplit(id)}
+              >
+                {glyph}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span />
+        )}
         <div className="actions">
           <button onClick={() => onCopyAll(copyWhat)}>Copiar</button>
           <button onClick={onOverlay}>Subtitulos</button>
@@ -938,7 +1202,9 @@ function TranscriptTab({
           >
             .srt
           </button>
-          <button onClick={() => onExport(copyWhat === "both" ? "bilingual" : "txt")}>.txt</button>
+          <button onClick={() => onExport(copyWhat === "both" ? "bilingual" : "txt")}>
+            {copyWhat === "both" ? ".txt bilingue" : ".txt"}
+          </button>
           <button onClick={onClear}>Limpiar</button>
         </div>
       </div>
@@ -947,6 +1213,7 @@ function TranscriptTab({
         <MeetingView
           translations={translations}
           partials={partials}
+          voiceOn={voiceOn}
           salaName={salaName}
           salaTargetName={salaTargetName}
           micName={micName}
@@ -986,9 +1253,14 @@ function TranscriptTab({
 /// filas a proposito, porque asi fluye la traduccion: lo de arriba va de
 /// izquierda a derecha (les leo) y lo de abajo de derecha a izquierda (mi
 /// voz les habla).
+// La vista solo se ofrece con las DOS fuentes activas (ver availableSplits),
+// asi que las cuatro cajas siempre tienen sentido. Filtrarlas por la
+// configuracion viva ademas escondería lo que una fuente ya habia grabado
+// antes de desactivarla.
 function MeetingView({
   translations,
   partials,
+  voiceOn,
   salaName,
   salaTargetName,
   micName,
@@ -997,6 +1269,9 @@ function MeetingView({
 }: {
   translations: TranslatedLine[];
   partials: Partials;
+  /** Sin voz activada, la caja de abajo a la izquierda no es "lo que tu voz
+   *  les dice" sino solo la traduccion de lo que dices. */
+  voiceOn: boolean;
   salaName: string;
   salaTargetName: string;
   micName: string;
@@ -1054,7 +1329,9 @@ function MeetingView({
       </section>
 
       <section className="pane">
-        <h3 className="pane-title">Mi voz les dice — {micTargetName}</h3>
+        <h3 className="pane-title">
+          {voiceOn ? "Mi voz les dice" : "Lo mio, traducido"} — {micTargetName}
+        </h3>
         <div className="scroll transcript">
           {/* Los ecos no se pronuncian, asi que aqui tampoco se muestran:
               esta caja es "lo que la voz va a decir", y mentiria. */}

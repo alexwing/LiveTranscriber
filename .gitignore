@@ -23,6 +23,11 @@ __pycache__/
 # esta en transcriber-config.example.toml.
 transcriber-config.toml
 
+# Los perfiles guardan configuraciones enteras, asi que arrastran lo mismo:
+# rutas absolutas, ids de dispositivo de esta maquina y la ruta del WAV con
+# la voz del usuario. Nada de eso pinta en el repositorio.
+transcriber-profiles.toml
+
 # Transcripciones exportadas: son contenido de quien use la app, no del repo.
 # La excepcion cubre requirements.txt Y requirements-tts.txt: con solo el
 # primero, la receta del venv de voz quedaba invisible para git y un

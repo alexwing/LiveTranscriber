@@ -194,6 +194,15 @@ button.stop {
   flex-wrap: wrap;
 }
 
+ul.note {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+ul.note li {
+  margin-bottom: 3px;
+}
+
 /* Un boton que se lee como un enlace, para acciones dentro de una nota. */
 .link-button {
   background: none;
@@ -238,6 +247,12 @@ button.stop {
   gap: 10px;
   flex: 1;
   min-height: 0;
+}
+
+/* Aviso de accion destructiva a punto de confirmarse. */
+.danger {
+  border-color: var(--accent-dim);
+  color: var(--accent);
 }
 
 .meeting-grid .pane {

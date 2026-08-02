@@ -122,6 +122,21 @@ export const SPLITS: Array<[Split, string, string]> = [
   ["meeting", "⊞", "Reunion: los demas arriba, yo abajo, un idioma por columna"],
 ];
 
+/** Modos de vista que tienen sentido con esta configuracion.
+ *
+ *  Sin traduccion no hay nada que poner en la columna traducida, y la vista
+ *  de reunion necesita las dos fuentes: con una sola, la mitad de sus cajas
+ *  se quedaria vacia para siempre. Ofrecer modos que solo pueden salir en
+ *  blanco es invitar a pensar que la app no funciona. */
+export function availableSplits(cfg: AppConfig): Split[] {
+  return SPLITS.map(([id]) => id).filter((id) => {
+    if (id === "only-original") return true;
+    if (!cfg.translate) return false;
+    if (id === "meeting") return cfg.capture_system && cfg.capture_mic;
+    return true;
+  });
+}
+
 /** Nombre legible de un idioma a partir de su locale. */
 export function languageName(code: string): string {
   const found = LANGUAGES.find(([c]) => c === code);
@@ -156,10 +171,28 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   }
 }
 
+/** Un dispositivo del perfil que ya no existe y ha caido al predeterminado. */
+export interface DeviceFallback {
+  /** "sistema" | "microfono" | "voz" */
+  what: string;
+  missing_id: string;
+}
+
+export interface AppliedProfile {
+  config: AppConfig;
+  fallbacks: DeviceFallback[];
+}
+
 export const api = {
   getConfig: () => call<AppConfig>("get_config"),
   saveConfig: (cfg: AppConfig) => call<void>("save_config", { new: cfg }),
   listDevices: (kind: DeviceKind) => call<AudioDevice[]>("list_devices", { kind }),
+  listProfiles: () => call<string[]>("list_profiles"),
+  /** Guarda la configuracion actual con ese nombre. Repetir nombre actualiza. */
+  saveProfile: (name: string) => call<string[]>("save_profile", { name }),
+  /** Aplica el perfil y dice que dispositivos han caido al predeterminado. */
+  loadProfile: (name: string) => call<AppliedProfile>("load_profile", { name }),
+  deleteProfile: (name: string) => call<string[]>("delete_profile", { name }),
   isRunning: () => call<boolean>("is_running"),
   start: () => call<void>("start_transcription"),
   stop: () => call<void>("stop_transcription"),

@@ -120,6 +120,7 @@ impl PythonSidecar {
         if let Some(home) = &cfg.hf_home {
             command.env("HF_HOME", home);
         }
+        crate::no_console(&mut command);
 
         let mut child = command.spawn().map_err(|e| {
             EngineError::Spawn(format!("no se pudo lanzar {}: {e}", cfg.python.display()))

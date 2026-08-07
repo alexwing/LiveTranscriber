@@ -83,7 +83,8 @@ KOKORO_LANGS = {
     "hi": "h",
     "it": "i",
     "pt": "p",
-    "ja": "j",
+    # Sin "ja": misaki[ja] arrastra pyopenjtalk, que en Windows hay que
+    # compilar con Visual Studio. Ver kokoro_supports en speak.rs.
     "zh": "z",
 }
 

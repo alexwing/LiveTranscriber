@@ -138,7 +138,8 @@ impl Default for SpeakConfig {
         Self {
             enabled: false,
             engine: "chatterbox".to_string(),
-            python: PathBuf::from(r"E:\projects\voicebox\backend\venv\Scripts\python.exe"),
+            // Vacio, por lo mismo que en `AppConfig::default`.
+            python: PathBuf::new(),
             script: PathBuf::from("sidecar/tts_server.py"),
             voice_wav: None,
             kokoro_voice: "af_heart".to_string(),
@@ -219,9 +220,15 @@ pub fn default_output_dir() -> PathBuf {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            python: PathBuf::from(
-                r"E:\projects\nemotron-3.5-asr-streaming-0.6b\.venv\Scripts\python.exe",
-            ),
+            // Vacio a proposito, y no una ruta de ejemplo: estos valores
+            // acaban COMPILADOS en el binario que se publica, asi que
+            // cualquier ruta concreta que se ponga aqui es la ruta de la
+            // maquina de quien la escribio, viajando al equipo de otro. Ya
+            // paso: hubo aqui un `E:\projects\...` del portatil del autor, y
+            // en un equipo ajeno la app fallaba pidiendo un fichero que solo
+            // existia en el suyo. Vacio produce el unico error correcto:
+            // "no hay Python configurado, ejecuta el instalador".
+            python: PathBuf::new(),
             script: PathBuf::from("sidecar/asr_server.py"),
             mt_script: PathBuf::from("sidecar/mt_server.py"),
             hf_home: None,

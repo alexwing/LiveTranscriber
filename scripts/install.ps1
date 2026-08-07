@@ -62,7 +62,13 @@ $ProgressPreference = "SilentlyContinue"
 
 # Versiones de Python con ruedas de torch disponibles. 3.14 todavia no las
 # tiene, asi que no vale aunque este instalado.
+#
+# Con -WithVoice se cae ademas la 3.13: kokoro y misaki declaran
+# `Requires-Python: <3.13`, asi que pip los rechaza. Descartarla AQUI, antes de
+# empezar, en vez de dejar que reviente en el paso 7 despues de ~20 minutos y
+# varios GB descargados.
 $SupportedPython = @("3.12", "3.13", "3.11", "3.10")
+if ($WithVoice) { $SupportedPython = @("3.12", "3.11", "3.10") }
 $TorchIndex = "https://download.pytorch.org/whl/cu128"
 $NeedGB = 15
 # La voz trae otro venv con su propio torch (~7 GB) y ~4 GB de modelos.
@@ -242,6 +248,9 @@ if (-not $python) {
         Write-Host ""
         Write-Host "  None of these Pythons is here: $($SupportedPython -join ', ')" -ForegroundColor Red
         Write-Host "  (3.14 won't do yet: PyTorch doesn't publish wheels for it)" -ForegroundColor DarkGray
+        if ($WithVoice) {
+            Write-Host "  (and 3.13 is out with -WithVoice: kokoro and misaki require <3.13)" -ForegroundColor DarkGray
+        }
         Write-Host ""
         Write-Host "  Install it with:  winget install -e --id Python.Python.3.12"
         Write-Host "  Or run again:     .\scripts\install.ps1 -InstallPython"

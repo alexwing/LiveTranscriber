@@ -2,7 +2,7 @@
 # you change something in the interface, so there is no need to edit it by hand.
 
 # Interpreter with torch and transformers. This is the model project's venv.
-python = 'E:\projects\nemotron-3.5-asr-streaming-0.6b\.venv\Scripts\python.exe'
+python = 'C:\path\to\LiveTranscriber\.venv\Scripts\python.exe'
 script = 'sidecar/asr_server.py'
 mt_script = 'sidecar/mt_server.py'
 
@@ -115,12 +115,12 @@ engine = "chatterbox"
 # Interpreter of the VOICE venv. It is not the ASR one and it cannot be: the ASR
 # requires transformers>=5.13 (AutoModelForRNNT) and chatterbox-tts is tested with
 # 4.57.x. Two environments, each sidecar with its own.
-python = 'E:\projects\voicebox\backend\venv\Scripts\python.exe'
+python = 'C:\path\to\LiveTranscriber\.venv-tts\Scripts\python.exe'
 script = 'sidecar/tts_server.py'
 
 # Sample of your voice to clone (chatterbox only): a WAV with 10-30 seconds of
 # clean speech. The cloned voice imitates the tone of the sample.
-# voice_wav = 'C:\voces\mi-voz.wav'
+# voice_wav = 'C:\path\to\my-voice.wav'
 
 # Preset voice (kokoro only). The prefix says language and gender:
 #   af_heart (English, f)  am_adam (English, m)

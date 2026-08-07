@@ -175,12 +175,36 @@ fn resolve_existing(app: Option<&AppHandle>, path: &Path) -> Option<PathBuf> {
 
 /// Igual que [`resolve_existing`] pero con un error que dice donde se ha
 /// mirado, que es la diferencia entre un fallo diagnosticable y uno que no.
+///
+/// Distingue tres estados, no dos. "Sin configurar" y "configurado pero no
+/// esta" se arreglan de forma distinta, y confundirlos mandaba al usuario a
+/// buscar un fichero que nunca tuvo que existir.
 fn require_existing(app: &AppHandle, path: &Path, what: &str) -> Result<PathBuf, CmdError> {
+    if path.as_os_str().is_empty() {
+        let where_ = app
+            .try_state::<AppState>()
+            .map(|s| s.config_path.display().to_string())
+            .unwrap_or_else(|| CONFIG_FILE.to_string());
+        return Err(format!(
+            "no {what} is configured. Run scripts\\install.ps1 to provision it, \
+             or set the path by hand in {where_}"
+        )
+        .into());
+    }
     if let Some(found) = resolve_existing(Some(app), path) {
         return Ok(found);
     }
     if path.is_absolute() {
-        return Err(format!("cannot find {what} at {}", path.display()).into());
+        let where_ = app
+            .try_state::<AppState>()
+            .map(|s| format!(" (from {})", s.config_path.display()))
+            .unwrap_or_default();
+        return Err(format!(
+            "cannot find {what} at {}{where_}. If that path belongs to another \
+             machine, run scripts\\install.ps1 to rewrite it",
+            path.display()
+        )
+        .into());
     }
     let tried: Vec<String> = search_bases(Some(app))
         .into_iter()
@@ -492,10 +516,10 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
 
     // Si algo falla aqui hay que soltar el flag, o la app se queda creyendo
     // que esta transcribiendo y el boton no vuelve.
-    let resolved = require_existing(app, &sidecar.script, "el sidecar")
+    let resolved = require_existing(app, &sidecar.script, "the ASR sidecar")
         .and_then(|script| {
             sidecar.script = script;
-            require_existing(app, &sidecar.python, "el interprete de Python")
+            require_existing(app, &sidecar.python, "Python interpreter")
         });
     match resolved {
         Ok(python) => sidecar.python = python,
@@ -700,8 +724,8 @@ struct SpeechWiring {
 /// traductor, y va aparte para poder correrla a la vez que la de la voz.
 fn start_translator(app: &AppHandle, config: &AppConfig) -> Result<MtSidecar, CmdError> {
     let mut mt = config.mt();
-    mt.script = require_existing(app, &mt.script, "el sidecar de traduccion")?;
-    mt.python = require_existing(app, &mt.python, "el interprete de Python")?;
+    mt.script = require_existing(app, &mt.script, "the translation sidecar")?;
+    mt.python = require_existing(app, &mt.python, "Python interpreter")?;
 
     let sidecar = MtSidecar::spawn(&mt)?;
     // Cargar NLLB lleva medio minuto la primera vez; sin esperar aqui, la

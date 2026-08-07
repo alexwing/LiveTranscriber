@@ -326,6 +326,18 @@ fn run(args: RunArgs) -> Result<()> {
         "cannot find the sidecar script at {}",
         sidecar.script.display()
     );
+    // El valor por defecto es vacio a proposito (ver AppConfig::default), asi
+    // que sin --python no hay nada que lanzar. Decirlo aqui evita intentar
+    // ejecutar la cadena vacia y que el error sea del sistema operativo.
+    anyhow::ensure!(
+        !sidecar.python.as_os_str().is_empty(),
+        "no Python interpreter given: pass --python <path to the venv python.exe>"
+    );
+    anyhow::ensure!(
+        sidecar.python.exists(),
+        "cannot find the Python interpreter at {} (pass it with --python)",
+        sidecar.python.display()
+    );
 
     let source = args.from.source();
     let cfg = SessionConfig {
@@ -481,6 +493,10 @@ fn speak(args: SpeakArgs) -> Result<()> {
         tts.script.exists(),
         "cannot find the voice sidecar at {}",
         tts.script.display()
+    );
+    anyhow::ensure!(
+        !tts.python.as_os_str().is_empty(),
+        "no voice interpreter given: pass --python <path to the .venv-tts python.exe>"
     );
     anyhow::ensure!(
         tts.python.exists(),

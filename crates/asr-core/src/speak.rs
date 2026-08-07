@@ -111,8 +111,13 @@ pub fn tts_lang_code(locale: &str) -> Option<&'static str> {
 /// ¿Tiene kokoro voces para este codigo corto? Es un subconjunto de los 23 de
 /// chatterbox; sin esta comprobacion al arrancar, un destino como el aleman
 /// pasaria el arranque con kokoro y fallaria en cada frase de la reunion.
+/// Sin `ja`: el japones de kokoro necesita `misaki[ja]`, que arrastra
+/// `pyopenjtalk`, que no publica rueda para Windows y exige el compilador de
+/// C++ de Visual Studio. Un Windows limpio no lo tiene, asi que instalarlo
+/// romperia la instalacion para todos a cambio de un idioma. Anunciarlo y
+/// fallar al arrancar es peor que no anunciarlo.
 pub fn kokoro_supports(lang: &str) -> bool {
-    matches!(lang, "en" | "es" | "fr" | "hi" | "it" | "pt" | "ja" | "zh")
+    matches!(lang, "en" | "es" | "fr" | "hi" | "it" | "pt" | "zh")
 }
 
 // -------------------------------------------------------- registro de eco

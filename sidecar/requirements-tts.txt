@@ -39,6 +39,11 @@ spacy-pkuseg
 # extras, pero en y es vienen en el paquete base.
 kokoro>=0.9.4
 misaki[en]>=0.9.4
+# El chino lo anuncia KOKORO_LANGS, asi que su G2P tiene que estar de verdad:
+# sin esto, elegir zh arrancaba y moria en el primer import. Es rueda pura de
+# Python, no cuesta nada. El japones NO se anuncia y por eso no esta aqui:
+# misaki[ja] necesita pyopenjtalk, que en Windows hay que compilar.
+misaki[zh]>=0.9.4
 # click lo necesita el spacy que arrastra misaki (via typer), pero en la
 # instalacion limpia de prueba pip dejo typer 0.27 SIN click y kokoro moria
 # al importar. Descubierto instalando en limpio, como todo en este fichero.

@@ -206,6 +206,101 @@ fn compose_filename(date: &str, name: &str, format: &str) -> String {
     format!("{date}_{}{suffix}.{ext}", sanitize_file_stem(name))
 }
 
+/// Nombre del fichero de configuracion.
+pub const CONFIG_FILE: &str = "transcriber-config.toml";
+
+/// Variable de entorno para apuntar a otro sitio. La usa `npm run app:dev`
+/// para que el desarrollo siga leyendo el TOML del repositorio.
+pub const CONFIG_ENV: &str = "LIVETRANSCRIBER_CONFIG";
+
+/// Donde vive `transcriber-config.toml`. UNA sola ubicacion.
+///
+/// Antes se buscaba por varias bases (el directorio de trabajo, el del
+/// ejecutable subiendo niveles) y se escribia en la primera que valiera. Eso
+/// daba DOS ficheros: `install.ps1` escribia en el clon del repositorio y la
+/// aplicacion instalada, que vive en `%LOCALAPPDATA%`, no miraba ahi nunca.
+/// Instalar desde la release y provisionar desde el repositorio no se
+/// encontraban, y el usuario acababa con la configuracion por defecto sin que
+/// nada se lo dijera.
+///
+/// Ahora hay un sitio y solo uno. `%APPDATA%` y no el directorio del
+/// ejecutable porque con el MSI la aplicacion vive en `Program Files`, donde
+/// un usuario sin permisos de administrador no puede escribir.
+pub fn config_location() -> PathBuf {
+    if let Some(explicit) = std::env::var_os(CONFIG_ENV) {
+        let path = PathBuf::from(explicit);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(CONFIG_FILE)
+}
+
+fn config_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("LiveTranscriber")
+}
+
+/// Sitios donde vivia la configuracion antes de que hubiera una ubicacion
+/// canonica, en el orden en que se miraban.
+fn legacy_config_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let mut candidate = parent.to_path_buf();
+            for _ in 0..4 {
+                dirs.push(candidate.clone());
+                if !candidate.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    dirs.dedup();
+    dirs
+}
+
+/// Trae la configuracion de donde estuviera a la ubicacion canonica, una vez.
+///
+/// Sin esto el cambio de ubicacion romperia a todo el que ya tenga ajustes:
+/// arrancaria con la configuracion por defecto y sus dispositivos, idiomas y
+/// muestra de voz se quedarian en un fichero que ya nadie lee. Los perfiles
+/// viajan con ella, que para eso son hermanos.
+///
+/// Devuelve de donde la trajo, si la trajo.
+pub fn migrate_legacy_config() -> Option<PathBuf> {
+    if std::env::var_os(CONFIG_ENV).is_some() {
+        return None;
+    }
+    let target = config_location();
+    if target.exists() {
+        return None;
+    }
+    let source = legacy_config_dirs()
+        .into_iter()
+        .map(|dir| dir.join(CONFIG_FILE))
+        .find(|candidate| candidate.is_file())?;
+
+    let dir = target.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::copy(&source, &target).ok()?;
+
+    // Los perfiles guardan dispositivos y rutas; perderlos al migrar seria
+    // exactamente el fallo que esto viene a evitar.
+    let profiles = crate::profiles_path(&source);
+    if profiles.is_file() {
+        let _ = std::fs::copy(&profiles, crate::profiles_path(&target));
+    }
+    Some(source)
+}
+
 /// Carpeta por defecto: `Documentos\LiveTranscriber` del usuario.
 pub fn default_output_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")
@@ -407,6 +502,45 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// El valor por defecto de `python` tiene que estar VACIO.
+    ///
+    /// Este test existe por un fallo real: habia aqui la ruta del portatil de
+    /// quien lo escribio, quedo compilada en el binario que se publica, y en
+    /// el equipo de otra persona la aplicacion pedia un fichero que solo
+    /// existia en el suyo. Cualquier ruta concreta que vuelva a aparecer aqui
+    /// reproduce el fallo, asi que se bloquea desde el test.
+    #[test]
+    fn los_defectos_no_llevan_rutas_de_nadie() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.python, PathBuf::new(), "python por defecto debe ir vacio");
+        assert_eq!(
+            cfg.speak.python,
+            PathBuf::new(),
+            "speak.python por defecto debe ir vacio"
+        );
+        // Los scripts si son relativos, y eso esta bien: viajan con el bundle.
+        for path in [&cfg.script, &cfg.mt_script, &cfg.speak.script] {
+            assert!(
+                path.is_relative(),
+                "{} deberia ser relativa al bundle",
+                path.display()
+            );
+        }
+    }
+
+    /// La variable de entorno manda sobre `%APPDATA%`, que es de lo que vive
+    /// el desarrollo: `npm run app:dev` la apunta al TOML del repositorio.
+    #[test]
+    fn la_variable_de_entorno_gana() {
+        let dir = std::env::temp_dir().join("lt-config-env-test");
+        let wanted = dir.join("mio.toml");
+        // SAFETY: hilo unico en este test; solo se toca esta variable.
+        unsafe { std::env::set_var(CONFIG_ENV, &wanted) };
+        let got = config_location();
+        unsafe { std::env::remove_var(CONFIG_ENV) };
+        assert_eq!(got, wanted);
+    }
 
     #[test]
     fn el_toml_da_la_vuelta_completa() {

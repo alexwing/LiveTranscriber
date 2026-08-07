@@ -36,7 +36,10 @@ pub(crate) fn no_console(command: &mut std::process::Command) {
     }
 }
 
-pub use config::{sanitize_file_stem, AppConfig, SpeakConfig};
+pub use config::{
+    config_location, migrate_legacy_config, sanitize_file_stem, AppConfig, SpeakConfig,
+    CONFIG_ENV, CONFIG_FILE,
+};
 pub use engine::{AsrEngine, AsrEvent, EngineError, EngineFactory};
 pub use profiles::{
     profiles_path, AppliedProfile, DeviceFallback, DeviceIds, Profile, ProfileStore,

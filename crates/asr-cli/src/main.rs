@@ -314,7 +314,11 @@ struct RunArgs {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let defaults = AppConfig::default();
+    // La configuracion de verdad, no `default()`: sin esto la herramienta
+    // validaba un mundo distinto del que ejecuta la aplicacion, y el README
+    // mandaba probar el circuito con unos valores que solo existian en la
+    // maquina de quien lo escribio.
+    let defaults = AppConfig::load(&asr_core::config_location()).unwrap_or_default();
     let mut sidecar = defaults.sidecar();
     sidecar.python = args.python.unwrap_or(defaults.python);
     sidecar.script = args.script;
@@ -478,7 +482,11 @@ struct SpeakArgs {
 }
 
 fn speak(args: SpeakArgs) -> Result<()> {
-    let defaults = AppConfig::default();
+    // La configuracion de verdad, no `default()`: sin esto la herramienta
+    // validaba un mundo distinto del que ejecuta la aplicacion, y el README
+    // mandaba probar el circuito con unos valores que solo existian en la
+    // maquina de quien lo escribio.
+    let defaults = AppConfig::load(&asr_core::config_location()).unwrap_or_default();
     let mut tts = defaults.tts();
     tts.engine = args.engine;
     tts.script = args.script;

@@ -120,14 +120,32 @@ So the split is:
 
 The `.msi` carries the Python sidecars inside it as bundle resources, so the app
 finds them on its own. What it needs is an interpreter with the dependencies, and
-`install.ps1` writes that path into the configuration (or you pick it from the
-interface).
+`install.ps1` writes that path into the configuration. **There is no field for it in
+the interface**: if it is wrong, run `install.ps1` again or edit the file.
 
-**Installed with the MSI, the configuration does not live next to the `.exe`.** In
-`Program Files` a user without administrator rights can't write, so the app detects
-that — by actually trying to write, not by inspecting permissions — and moves to
-`%APPDATA%\LiveTranscriber\`. Without that, every change made in the interface would
-be lost on close.
+**The configuration lives in one place, and it is not next to the `.exe`:**
+
+```
+%APPDATA%\LiveTranscriber\transcriber-config.toml
+%APPDATA%\LiveTranscriber\transcriber-profiles.toml
+```
+
+That is where `install.ps1` writes it, where `verify.ps1` reads it, and where the app
+looks — installed or not. It has to be a single agreed location, because the installer
+runs from a cloned repository and the installed app runs from `%LOCALAPPDATA%` or
+`Program Files`: anything derived from "wherever I happen to be" gives two files that
+never meet. (It used to, and that is how a colleague ended up running the app against
+paths from someone else's machine.)
+
+Two consequences worth knowing. `Program Files` is not writable by a non-admin user, so
+storing the configuration beside the `.exe` would lose every change on close. And if you
+had a configuration in the old location, the app copies it — profiles included — the
+first time it starts.
+
+For development, `npm run app:dev` sets `LIVETRANSCRIBER_CONFIG` to the repository's own
+`transcriber-config.toml`, so the project's configuration is used instead of your
+personal one. Setting that variable by hand overrides the location everywhere: app,
+`install.ps1` and `verify.ps1`.
 
 ## Where the models end up, and why they aren't duplicated
 

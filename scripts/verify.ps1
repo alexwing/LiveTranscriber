@@ -68,7 +68,13 @@ Write-Host "  Verification" -ForegroundColor White
 Write-Host ""
 
 # --- configuracion ---------------------------------------------------------
-$configPath = Join-Path $Root "transcriber-config.toml"
+# Misma ubicacion canonica que install.ps1 y que la aplicacion. Con
+# LIVETRANSCRIBER_CONFIG puesto se respeta, para poder verificar un desarrollo.
+$configPath = if ($env:LIVETRANSCRIBER_CONFIG) {
+    $env:LIVETRANSCRIBER_CONFIG
+} else {
+    Join-Path (Join-Path $env:APPDATA "LiveTranscriber") "transcriber-config.toml"
+}
 Check "configuration"
 if (-not (Test-Path $configPath)) {
     Bad "transcriber-config.toml not found" "run scripts\install.ps1"

@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-const CONFIG_FILE: &str = "transcriber-config.toml";
+use asr_core::CONFIG_FILE;
 
 /// Error que viaja al frontend como `{ message }`, igual que en TapoController.
 #[derive(Debug, serde::Serialize)]
@@ -95,71 +95,19 @@ fn search_bases(app: Option<&AppHandle>) -> Vec<PathBuf> {
     bases
 }
 
-/// Marca la raiz del proyecto. Sirve como marcador porque, al reves que el
-/// sidecar, Tauri no lo copia a ningun sitio: el sidecar esta declarado como
-/// recurso, asi que en dev aparece tambien en `target/debug/sidecar/` y no
-/// distingue la raiz de verdad.
-const ROOT_MARKER: &str = "transcriber-config.example.toml";
-
-/// Comprueba que se puede escribir en un directorio, intentandolo de verdad.
-///
-/// Mirar permisos en Windows es un lio (ACL, virtualizacion de carpetas), asi
-/// que sale mas barato y mas fiable crear un fichero temporal y borrarlo.
-fn is_writable(dir: &Path) -> bool {
-    if !dir.is_dir() {
-        return false;
-    }
-    let probe = dir.join(".livetranscriber-write-test");
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 /// Donde vive `transcriber-config.toml`.
 ///
-/// Por orden: uno que ya exista; la raiz del proyecto si estamos en el repo
-/// (para que `tauri dev` no lo escriba dentro de `src-tauri`); el directorio del
-/// ejecutable **si se puede escribir en el**; y si no, `%APPDATA%`.
-///
-/// Lo ultimo no es un adorno: instalada con el MSI, la app vive en
-/// `Program Files`, donde un usuario sin permisos de administrador no puede
-/// escribir. Sin esta salida, guardar la configuracion fallaria y cada cambio
-/// hecho en la interfaz se perderia al cerrar.
+/// La decide `asr-core`, no esta capa: tambien la necesita `asr-cli`, y tener
+/// dos implementaciones de "donde esta la configuracion" es justo el fallo que
+/// hacia que el instalador y la aplicacion instalada no se encontraran.
 fn config_location() -> PathBuf {
-    let bases = search_bases(None);
-
-    if let Some(existing) = bases
-        .iter()
-        .map(|base| base.join(CONFIG_FILE))
-        .find(|candidate| candidate.exists())
-    {
-        return existing;
-    }
-
-    if let Some(root) = bases.iter().find(|base| base.join(ROOT_MARKER).exists()) {
-        return root.join(CONFIG_FILE);
-    }
-
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
-        if is_writable(&exe_dir) {
-            return exe_dir.join(CONFIG_FILE);
-        }
+    if let Some(from) = asr_core::migrate_legacy_config() {
         tracing::info!(
-            "no se puede escribir en {}, la configuracion va a APPDATA",
-            exe_dir.display()
+            "configuracion traida de {} a la ubicacion canonica",
+            from.display()
         );
     }
-
-    let appdata = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("LiveTranscriber");
-    let _ = std::fs::create_dir_all(&appdata);
-    appdata.join(CONFIG_FILE)
+    asr_core::config_location()
 }
 
 /// Primera ubicacion existente para `path`, o `None`.

@@ -121,6 +121,18 @@ fn resolve_existing(app: Option<&AppHandle>, path: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.exists())
 }
 
+/// El instalador, con su ruta de verdad.
+///
+/// Instalada la aplicacion, `install.ps1` viaja dentro del bundle: decir
+/// "ejecuta scripts\install.ps1" a secas manda al usuario a buscar un fichero
+/// que no esta en su directorio de trabajo, sino entre los recursos.
+fn installer_hint(app: &AppHandle) -> String {
+    match resolve_existing(Some(app), Path::new("scripts/install.ps1")) {
+        Some(found) => format!("\"{}\"", found.display()),
+        None => "scripts\\install.ps1".to_string(),
+    }
+}
+
 /// Igual que [`resolve_existing`] pero con un error que dice donde se ha
 /// mirado, que es la diferencia entre un fallo diagnosticable y uno que no.
 ///
@@ -134,8 +146,9 @@ fn require_existing(app: &AppHandle, path: &Path, what: &str) -> Result<PathBuf,
             .map(|s| s.config_path.display().to_string())
             .unwrap_or_else(|| CONFIG_FILE.to_string());
         return Err(format!(
-            "no {what} is configured. Run scripts\\install.ps1 to provision it, \
-             or set the path by hand in {where_}"
+            "no {what} is configured. Run {} to provision it, \
+             or set the path by hand in {where_}",
+            installer_hint(app)
         )
         .into());
     }
@@ -149,8 +162,9 @@ fn require_existing(app: &AppHandle, path: &Path, what: &str) -> Result<PathBuf,
             .unwrap_or_default();
         return Err(format!(
             "cannot find {what} at {}{where_}. If that path belongs to another \
-             machine, run scripts\\install.ps1 to rewrite it",
-            path.display()
+             machine, run {} to rewrite it",
+            path.display(),
+            installer_hint(app)
         )
         .into());
     }
@@ -1072,14 +1086,65 @@ fn register_shortcuts(app: &AppHandle, config: &AppConfig) {
 
 // --------------------------------------------------------------- arranque
 
+/// Arranca el log, a fichero y no a stdout.
+///
+/// La aplicacion se compila con `windows_subsystem = "windows"`, asi que no
+/// tiene consola: todo lo que se escribia en stdout se perdia. Y sin embargo
+/// INSTALL.md, el README y varios mensajes de error mandaban al usuario a
+/// "mirar el log". No habia ninguno.
+///
+/// Va junto a la configuracion, en `%APPDATA%\LiveTranscriber\logs\`, con
+/// rotacion diaria para que una sesion larga no deje un fichero eterno. Sigue
+/// saliendo por stdout ademas, que es lo util en `tauri dev`.
+fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::prelude::*;
+
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into())
+    };
+
+    let dir = asr_core::config_location()
+        .parent()
+        .map(|p| p.join("logs"));
+
+    // Si el fichero no se puede abrir, la aplicacion arranca igual: quedarse
+    // sin log es molesto, no arrancar es peor.
+    let file_layer = dir.and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let appender = tracing_appender::rolling::daily(&dir, "live-transcriber.log");
+        let (writer, guard) = tracing_appender::non_blocking(appender);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_filter(filter());
+        Some((layer, guard, dir))
+    });
+
+    match file_layer {
+        Some((layer, guard, dir)) => {
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_filter(filter()))
+                .with(layer)
+                .init();
+            tracing::info!("log en {}", dir.display());
+            Some(guard)
+        }
+        None => {
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_filter(filter()))
+                .init();
+            None
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // El guardia hay que mantenerlo vivo TODO el proceso: al soltarlo se cierra
+    // el hilo que escribe, y las ultimas lineas —justo las del fallo que se
+    // esta investigando— se quedan sin volcar.
+    let _log_guard = init_logging();
 
     let config_path = config_location();
     tracing::info!("configuracion en {}", config_path.display());

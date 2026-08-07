@@ -46,7 +46,14 @@
     "resources": {
       "../sidecar/asr_server.py": "sidecar/asr_server.py",
       "../sidecar/mt_server.py": "sidecar/mt_server.py",
-      "../sidecar/tts_server.py": "sidecar/tts_server.py"
+      "../sidecar/tts_server.py": "sidecar/tts_server.py",
+      "../scripts/install.ps1": "scripts/install.ps1",
+      "../scripts/verify.ps1": "scripts/verify.ps1",
+      "../scripts/fetch_models.py": "scripts/fetch_models.py",
+      "../scripts/smoke_test.py": "scripts/smoke_test.py",
+      "../sidecar/requirements.txt": "sidecar/requirements.txt",
+      "../sidecar/requirements-tts.txt": "sidecar/requirements-tts.txt",
+      "../install.cmd": "install.cmd"
     },
     "icon": [
       "icons/32x32.png",

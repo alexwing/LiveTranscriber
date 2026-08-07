@@ -17,33 +17,54 @@ Only two things, and the script installs neither:
 Python is installed by the script if you pass it `-InstallPython`. Rust and Node
 are only needed if you want to **build** the application; not to provision the model.
 
-## The install
+## Two ways in, and you only need one
 
-```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1
+**From the release.** Download the `.exe` from
+[Releases](https://github.com/alexwing/LiveTranscriber/releases), install it, and
+provision from the app's own folder — the installer carries the scripts inside it, so
+there is nothing to clone:
+
+```powershell
+& "$env:LOCALAPPDATA\LiveTranscriber\install.cmd" -InstallPython -WithVoice
 ```
 
-If you don't have Python:
+(That is where the `.exe` installer puts it. The `.msi` puts the same files under
+`C:\Program Files\LiveTranscriber\`.)
 
-```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -InstallPython
+The environments and models land in `%LOCALAPPDATA%\LiveTranscriber\`, and the
+application step is skipped: you already have the `.exe`.
+
+**From source**, if you want to build it yourself:
+
+```powershell
+git clone https://github.com/alexwing/LiveTranscriber
+cd LiveTranscriber
+.\install.cmd -InstallPython
 ```
+
+Use `install.cmd` and not the `.ps1` directly. A freshly installed Windows has its
+execution policy on `Restricted` and refuses to run a `.ps1`, and a file downloaded from
+the internet carries the mark-of-the-web on top of that. Both stop you at your very first
+command. The `.cmd` is not subject to either.
+
+## Options
 
 If the C: drive is tight, put the models somewhere else:
 
-```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -ModelsDir D:\models
+```powershell
+.\install.cmd -ModelsDir D:\models
 ```
 
 With the synthetic voice (speaking your translation through a virtual microphone):
 
-```bash
-cd E:\projects\LiveTranscriber; .\scripts\install.ps1 -WithVoice
+```powershell
+.\install.cmd -WithVoice
 ```
 
 It can be run again without breaking anything: it reuses whatever is already
 there. With `-Force` it rebuilds the virtual environments and regenerates the
-configuration.
+configuration — which also discards the settings you have changed in the interface,
+so it is not the first thing to reach for.
 
 ### Options
 
@@ -208,9 +229,14 @@ The app warns in amber when it happens, but better to save yourself the scare.
 
 ## If something goes wrong
 
+The log is at `%APPDATA%\LiveTranscriber\logs\`, one file per day. The application is
+built windowed and has no console, so that file is the only place its own account of
+what happened exists.
+
 | Symptom | Probable cause |
 |---|---|
 | `cannot find the sidecar` | Relative path and a different working directory. The error lists where it looked |
+| `no Python interpreter is configured` | Nothing has been provisioned yet on this machine. Run the installer; the message carries its full path |
 | The window comes up with `ERR_CONNECTION_REFUSED` | In development you need Vite. Use `npm run app:dev`, not the bare `.exe` |
 | No audio coming in, zero blocks | The device was idle: WASAPI doesn't generate events if nothing is playing |
 | Transcribes very little or nothing | Windows volume low. `cargo run -p asr-cli -- level --from system` tells you in two seconds |

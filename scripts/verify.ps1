@@ -21,6 +21,11 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 
+# Igual que install.ps1: este script viaja tambien dentro del instalador, y ahi
+# los entornos no estan al lado del codigo sino en el perfil del usuario.
+$FromSource = Test-Path (Join-Path $Root "Cargo.toml")
+$DataRoot = if ($FromSource) { $Root } else { Join-Path $env:LOCALAPPDATA "LiveTranscriber" }
+
 $script:Failed = 0
 
 <#
@@ -111,7 +116,7 @@ Pass "Python $($pv.Output.Trim())"
 # hasta el dia en que ese proyecto se mueva, se borre o se le instale algo que
 # rompa la compatibilidad. Conviene que se vea, no que se descubra el dia malo.
 Check "environment ownership"
-$ownVenv = Join-Path $Root ".venv"
+$ownVenv = Join-Path $DataRoot ".venv"
 if ($python -like (Join-Path $ownVenv "*")) {
     Pass "own (project .venv)"
 } else {

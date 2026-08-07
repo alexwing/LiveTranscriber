@@ -75,9 +75,28 @@ $NeedGB = 15
 if ($WithVoice) { $NeedGB = 27 }
 
 $Root = Split-Path -Parent $PSScriptRoot
-$Venv = Join-Path $Root ".venv"
+
+# El script viaja DOS veces: en el repositorio clonado y dentro del instalador,
+# como recurso del bundle. Son situaciones distintas y hay que distinguirlas.
+#
+# Desde el repositorio hay codigo, y los entornos van al lado. Desde una
+# aplicacion ya instalada no hay codigo que compilar, y $Root apunta a la
+# carpeta de recursos: con el MSI eso es Program Files, donde un usuario sin
+# permisos de administrador no puede escribir. Los entornos van entonces al
+# perfil del usuario, que siempre es suyo.
+$FromSource = Test-Path (Join-Path $Root "Cargo.toml")
+if ($FromSource) {
+    $DataRoot = $Root
+} else {
+    $DataRoot = Join-Path $env:LOCALAPPDATA "LiveTranscriber"
+    New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
+    # No hay nada que compilar sin codigo, y el usuario ya tiene el .exe.
+    $SkipBuild = $true
+}
+
+$Venv = Join-Path $DataRoot ".venv"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
-$VenvTts = Join-Path $Root ".venv-tts"
+$VenvTts = Join-Path $DataRoot ".venv-tts"
 $VenvTtsPython = Join-Path $VenvTts "Scripts\python.exe"
 
 $script:Step = 0
@@ -154,7 +173,12 @@ function Invoke-NativeLive {
 
 Write-Host ""
 Write-Host "  LiveTranscriber - installation" -ForegroundColor White
-Write-Host "  $Root" -ForegroundColor DarkGray
+if ($FromSource) {
+    Write-Host "  $Root" -ForegroundColor DarkGray
+} else {
+    Write-Host "  provisioning the installed app" -ForegroundColor DarkGray
+    Write-Host "  environments and models go to $DataRoot" -ForegroundColor DarkGray
+}
 
 # ---------------------------------------------------------------------------
 Write-Step "Preflight checks"
@@ -164,12 +188,31 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 }
 Write-Ok "64-bit Windows"
 
-$drive = (Get-Item $Root).PSDrive.Name
+# La unidad que importa es la de los ENTORNOS, no la del script: instalado, el
+# script esta en Program Files y los entornos en el perfil del usuario. Y si
+# -ModelsDir manda la cache a otra unidad, esa tambien cuenta.
+$drive = (Get-Item $DataRoot).PSDrive.Name
 $free = (Get-PSDrive $drive).Free / 1GB
 if ($free -lt $NeedGB) {
     Fail ("on {0}: {1:N1} GB left and about {2} GB are needed (Python environment + models)" -f $drive, $free, $NeedGB)
 }
 Write-Ok ("space on {0}: {1:N1} GB free" -f $drive, $free)
+
+if ($ModelsDir) {
+    $modelsParent = if (Test-Path $ModelsDir) { $ModelsDir } else { Split-Path -Parent $ModelsDir }
+    if ($modelsParent -and (Test-Path $modelsParent)) {
+        $mDrive = (Get-Item $modelsParent).PSDrive.Name
+        if ($mDrive -ne $drive) {
+            $mFree = (Get-PSDrive $mDrive).Free / 1GB
+            # Los modelos son la mayor parte: ~7 GB, ~11 con la voz.
+            $modelsGB = if ($WithVoice) { 11 } else { 7 }
+            if ($mFree -lt $modelsGB) {
+                Fail ("on {0} (-ModelsDir): {1:N1} GB left and about {2} GB of models are going there" -f $mDrive, $mFree, $modelsGB)
+            }
+            Write-Ok ("space on {0} for the models: {1:N1} GB free" -f $mDrive, $mFree)
+        }
+    }
+}
 
 # La GPU: sin ella el modelo va a CPU y no da tiempo real, asi que se avisa
 # fuerte pero no se aborta.

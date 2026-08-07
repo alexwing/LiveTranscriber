@@ -103,7 +103,8 @@ Useful switches:
 | `-SkipTranslator` | Skip NLLB. Saves 4.6 GB if you are not going to translate. |
 | `-WithVoice` | The second environment and the voice models. |
 | `-SkipBuild` | Python and models only. |
-| `-Force` | Rebuild the environments and the configuration. |
+| `-Force` | Rebuild the virtual environments. Leaves your settings alone. |
+| `-ResetConfig` | Replace the configuration with a fresh one, keeping a dated backup. |
 
 Full detail — every step in order, where things land, how the configuration is written —
 is in [INSTALL.md](INSTALL.md).

@@ -47,7 +47,7 @@ execution policy on `Restricted` and refuses to run a `.ps1`, and a file downloa
 the internet carries the mark-of-the-web on top of that. Both stop you at your very first
 command. The `.cmd` is not subject to either.
 
-## Options
+## Running it again, and the switches
 
 If the C: drive is tight, put the models somewhere else:
 
@@ -61,12 +61,15 @@ With the synthetic voice (speaking your translation through a virtual microphone
 .\install.cmd -WithVoice
 ```
 
-It can be run again without breaking anything: it reuses whatever is already
-there. With `-Force` it rebuilds the virtual environments and regenerates the
-configuration — which also discards the settings you have changed in the interface,
-so it is not the first thing to reach for.
+It can be run again without breaking anything. It reuses whatever is already there, and
+over an existing install it **keeps your settings** — it rewrites only the handful of
+keys that describe this machine (the interpreter paths, the precision, the model cache)
+and leaves the other twenty-nine alone.
 
-### Options
+`-Force` rebuilds the virtual environments. `-ResetConfig` is the one that replaces the
+configuration, and it keeps a dated backup next to it.
+
+### Switches
 
 | Option | What for |
 |---|---|
@@ -76,7 +79,8 @@ so it is not the first thing to reach for.
 | `-SkipBuild` | Don't build the app. Python and models only |
 | `-SkipVerify` | Skip the final check. Not recommended |
 | `-InstallPython` | Install Python 3.12 with winget if there is no valid one |
-| `-Force` | Rebuild virtual environments and configuration |
+| `-Force` | Rebuild the virtual environments. Your settings are kept |
+| `-ResetConfig` | Replace the configuration with a fresh one, keeping a `.bak-<date>` copy |
 
 ## What it does, in order
 

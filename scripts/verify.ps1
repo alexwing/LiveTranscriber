@@ -68,6 +68,58 @@ function Bad($detail, $fix) {
     $script:Failed++
 }
 
+<#
+Lee una cadena TOML de verdad, en vez de con una regex a ojo.
+
+La regex de antes cortaba en la primera comilla, y eso ya fallaba contra
+ficheros VALIDOS que escribe la propia aplicacion: `toml::to_string_pretty`
+elige literal ('...') para las rutas de Windows, y si la ruta lleva un
+apostrofo —un usuario llamado O'Brien, sin ir mas lejos— sube a literal triple
+('''...'''). Contra eso la regex devolvia un espacio, y el verificador mandaba
+a arreglar a mano una ruta que estaba perfectamente bien.
+
+El orden de las tres ramas es obligatorio: ''' antes que '.
+#>
+function Expand-TomlEscapes {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $sb = New-Object System.Text.StringBuilder
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $ch = $Text[$i]
+        if ($ch -ne '\') { [void]$sb.Append($ch); $i++; continue }
+        $i++
+        if ($i -ge $Text.Length) { break }
+        $n = $Text[$i]; $i++
+        switch -CaseSensitive ([string]$n) {
+            'b' { [void]$sb.Append([char]8) }
+            't' { [void]$sb.Append([char]9) }
+            'n' { [void]$sb.Append([char]10) }
+            'f' { [void]$sb.Append([char]12) }
+            'r' { [void]$sb.Append([char]13) }
+            '"' { [void]$sb.Append('"') }
+            '\' { [void]$sb.Append('\') }
+            'u' { $hex = $Text.Substring($i, 4); $i += 4; [void]$sb.Append([char][Convert]::ToInt32($hex, 16)) }
+            'U' { $hex = $Text.Substring($i, 8); $i += 8; [void]$sb.Append([char]::ConvertFromUtf32([Convert]::ToInt32($hex, 16))) }
+            default { [void]$sb.Append($n) }
+        }
+    }
+    return $sb.ToString()
+}
+
+function Read-TomlString {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Key
+    )
+    $m = [regex]::Match($Text, "(?m)^[ \t]*$([regex]::Escape($Key))[ \t]*=[ \t]*(\S.*?)[ \t]*$")
+    if (-not $m.Success) { return $null }
+    $raw = $m.Groups[1].Value
+    if ($raw -match "^'''(.*?)'''") { return $Matches[1] }
+    if ($raw -match "^'([^']*)'") { return $Matches[1] }
+    if ($raw -match '^"((?:[^"\\]|\\.)*)"') { return (Expand-TomlEscapes $Matches[1]) }
+    return (($raw -split '#')[0]).Trim()
+}
+
 Write-Host ""
 Write-Host "  Verification" -ForegroundColor White
 Write-Host ""
@@ -87,12 +139,11 @@ if (-not (Test-Path $configPath)) {
 }
 Pass $configPath
 
-$config = Get-Content $configPath -Raw
-function Get-Value($key) {
-    $m = [regex]::Match($config, "(?m)^\s*$key\s*=\s*['""]?([^'""\r\n]+)['""]?")
-    if ($m.Success) { return $m.Groups[1].Value.Trim() }
-    return $null
-}
+# -Encoding UTF8 no es decorativo: sin el, PS 5.1 lee como ANSI y un
+# output_name con acentos sale mojibake. Y quita el BOM que dejaban las
+# versiones antiguas del instalador, asi que lee los dos formatos.
+$config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
+function Get-Value($key) { return (Read-TomlString -Text $config -Key $key) }
 
 $python = Get-Value "python"
 $dtype = Get-Value "dtype"
@@ -111,6 +162,24 @@ if ($pv.Code -ne 0) {
     exit 1
 }
 Pass "Python $($pv.Output.Trim())"
+
+# Que el TOML parse de verdad, con un parser de verdad.
+#
+# El instalador lo edita por lineas, no con un parser, y eso cubre lo que el
+# instalador y la aplicacion escriben pero no lo que pueda escribir alguien a
+# mano. Esta comprobacion es la red: cuesta seis lineas, corre en cada
+# instalacion y en cada verificacion, y convierte un fichero corrupto en un
+# fallo ruidoso en vez de en una aplicacion que arranca por defecto.
+Check "configuration parses"
+$tomlProbe = Invoke-Native $python @("-c", "import sys,tomllib; tomllib.load(open(sys.argv[1],'rb'))", $configPath)
+if ($tomlProbe.Code -eq 0) {
+    Pass "valid TOML"
+} elseif ($tomlProbe.Output -match "No module named 'tomllib'") {
+    Write-Host "SKIPPED" -ForegroundColor Yellow -NoNewline
+    Write-Host "  tomllib needs Python 3.11+" -ForegroundColor DarkGray
+} else {
+    Bad "the configuration is not valid TOML" "back it up and run install.ps1 -ResetConfig"
+}
 
 # De donde sale el interprete importa: si es de otro proyecto, esto funciona
 # hasta el dia en que ese proyecto se mueva, se borre o se le instale algo que
@@ -212,9 +281,7 @@ if (Test-Path $mtDir) {
 $speakSection = [regex]::Match($config, "(?ms)^\[speak\].*?(?=^\[|\z)").Value
 function Get-SpeakValue($key) {
     if (-not $speakSection) { return $null }
-    $m = [regex]::Match($speakSection, "(?m)^\s*$key\s*=\s*['""]?([^'""\r\n]+)['""]?")
-    if ($m.Success) { return $m.Groups[1].Value.Trim() }
-    return $null
+    return (Read-TomlString -Text $speakSection -Key $key)
 }
 
 Check "synthetic voice"

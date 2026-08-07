@@ -196,10 +196,39 @@ pub struct AppState {
 
 impl AppState {
     fn new(config_path: PathBuf) -> Self {
-        let config = AppConfig::load(&config_path).unwrap_or_else(|e| {
-            tracing::warn!("no se pudo leer la configuracion ({e}), usando la de por defecto");
-            AppConfig::default()
-        });
+        // Un fichero que EXISTE pero no parsea no se sustituye en silencio.
+        //
+        // Antes se caia a `default()` con solo un warning al log, y en cuanto
+        // el usuario tocaba cualquier ajuste, `save_config` escribia esos
+        // valores por defecto ENCIMA de su fichero. Un TOML momentaneamente
+        // ilegible —una llave a medio escribir— se convertia en perdida
+        // definitiva de todo, sin ejecutar nada: bastaba abrir la app.
+        //
+        // Ahora se aparta con fecha antes de tocar nada, para que lo que habia
+        // siga existiendo aunque la app arranque por defecto.
+        let config = match AppConfig::load(&config_path) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::error!("no se pudo leer {} ({e})", config_path.display());
+                if config_path.exists() {
+                    // Segundos desde epoch en vez de una fecha bonita: evita
+                    // arrastrar chrono hasta esta capa por un nombre de copia.
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let backup = config_path.with_extension(format!("toml.broken-{stamp}"));
+                    match std::fs::copy(&config_path, &backup) {
+                        Ok(_) => tracing::error!(
+                            "configuracion ilegible apartada en {}; se arranca por defecto",
+                            backup.display()
+                        ),
+                        Err(e) => tracing::error!("y tampoco se pudo copiar a un .broken: {e}"),
+                    }
+                }
+                AppConfig::default()
+            }
+        };
         Self {
             config: Mutex::new(config),
             config_path,

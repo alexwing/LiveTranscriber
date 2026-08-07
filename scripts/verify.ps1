@@ -354,7 +354,12 @@ if ($outDir -and [System.IO.Path]::IsPathRooted($outDir)) {
 
 # --- captura de audio ------------------------------------------------------
 Check "WASAPI capture"
-$cli = Join-Path $Root "target\debug\asr-cli.exe"
+# En una instalacion asr-cli.exe viaja en el bundle, junto al .exe de la
+# aplicacion; desde el repositorio esta en target. Antes solo se miraba en
+# target, asi que esta comprobacion salia SKIPPED en toda instalacion real,
+# aconsejando un `cargo build` que ese usuario no puede ejecutar.
+$cli = Join-Path $Root "asr-cli.exe"
+if (-not (Test-Path $cli)) { $cli = Join-Path $Root "target\debug\asr-cli.exe" }
 if (-not (Test-Path $cli)) { $cli = Join-Path $Root "target\release\asr-cli.exe" }
 if (Test-Path $cli) {
     $devices = Invoke-Native $cli @("devices")
@@ -366,7 +371,7 @@ if (Test-Path $cli) {
     }
 } else {
     Write-Host "SKIPPED" -ForegroundColor Yellow -NoNewline
-    Write-Host "  build it with: cargo build --workspace" -ForegroundColor DarkGray
+    Write-Host "  no asr-cli.exe here; from the repository: cargo build -p asr-cli --release" -ForegroundColor DarkGray
 }
 
 # --- la prueba de verdad ---------------------------------------------------

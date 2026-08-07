@@ -53,7 +53,8 @@
       "../scripts/smoke_test.py": "scripts/smoke_test.py",
       "../sidecar/requirements.txt": "sidecar/requirements.txt",
       "../sidecar/requirements-tts.txt": "sidecar/requirements-tts.txt",
-      "../install.cmd": "install.cmd"
+      "../install.cmd": "install.cmd",
+      "../target/release/asr-cli.exe": "asr-cli.exe"
     },
     "icon": [
       "icons/32x32.png",

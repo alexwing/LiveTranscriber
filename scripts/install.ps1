@@ -885,10 +885,24 @@ if ($script:Warnings.Count -gt 0) {
     foreach ($w in $script:Warnings) { Write-Host "   - $w" -ForegroundColor Yellow }
 }
 Write-Host ""
-Write-Host "  Start in development:  npm run app:dev"
-Write-Host "  Test without the UI:   cargo run -p asr-cli -- devices"
-if ($WithVoice) {
-    Write-Host "  Test the voice:        cargo run -p asr-cli -- speak --engine kokoro --lang es --text `"hola`" --python .venv-tts\Scripts\python.exe"
+# Los consejos cambian segun donde se este: desde una instalacion no hay
+# `npm` ni `cargo`, y decirle a ese usuario que compile algo era mandarle a un
+# sitio al que no puede ir. El asr-cli.exe empaquetado si lo tiene al lado.
+$cliHint = Join-Path $Root "asr-cli.exe"
+if ($FromSource) {
+    Write-Host "  Start in development:  npm run app:dev"
+    Write-Host "  Test without the UI:   cargo run -p asr-cli -- devices"
+    if ($WithVoice) {
+        Write-Host "  Test the voice:        cargo run -p asr-cli -- speak --engine kokoro --lang es --text `"hola`" --python .venv-tts\Scripts\python.exe"
+    }
+} else {
+    Write-Host "  Start:                 the LiveTranscriber shortcut"
+    if (Test-Path $cliHint) {
+        Write-Host "  Test without the UI:   `"$cliHint`" devices"
+        if ($WithVoice) {
+            Write-Host "  Test the voice:        `"$cliHint`" speak --engine kokoro --lang es --text `"hola`" --python `"$VenvTtsPython`""
+        }
+    }
 }
 Write-Host ""
 Write-Host "  Turn the Windows volume up before testing: the loopback captures" -ForegroundColor DarkGray

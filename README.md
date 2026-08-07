@@ -259,6 +259,11 @@ there would be pure latency.
 
 The CLI is the test bench. It needs neither the window nor a call.
 
+The commands below use `cargo run`, which is the form for a cloned repository. If you
+installed from the release, `asr-cli.exe` ships inside it — substitute
+`"$env:LOCALAPPDATA\LiveTranscriber\asr-cli.exe"` for `cargo run -p asr-cli --` and
+everything else is the same. No Rust needed.
+
 ```powershell
 cargo run -p asr-cli -- devices
 ```
@@ -443,7 +448,11 @@ which stops the session first.
 
 Four subcommands: `devices`, `level` (with `--pid` for per-process loopback), `run` (with
 `--translate-to`, `--save-txt`, `--save-srt`) and `speak`. It is the way to diagnose
-anything without the GUI.
+anything without the GUI, and it reads the same configuration file the app does.
+
+`asr-cli.exe` is bundled with the installer, so it is there whether or not you have Rust:
+next to the application in `%LOCALAPPDATA%\LiveTranscriber\`, or in `target\release\`
+if you built from source.
 
 ---
 

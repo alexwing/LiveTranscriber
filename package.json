@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "app:dev": "set LIVETRANSCRIBER_CONFIG=%CD%\transcriber-config.toml && tauri dev",
-    "app:build": "tauri build",
+    "app:build": "cargo build -p asr-cli --release && tauri build",
     "icons": "python scripts/make_icons.py"
   },
   "dependencies": {

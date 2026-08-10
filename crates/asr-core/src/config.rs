@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// PartialEq para poder comparar lo que hay en memoria con lo que hay en
+// disco, y saber si alguien la ha cambiado por fuera.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     /// Interprete del venv donde estan torch y transformers.
@@ -93,7 +95,9 @@ pub struct AppConfig {
 /// Configuracion de la voz sintetica. Va aparte del resto porque es una
 /// funcion opcional entera: se activa sola, con sus propias dependencias
 /// (otro venv, otro modelo) y su propio dispositivo de salida.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// PartialEq para poder comparar lo que hay en memoria con lo que hay en
+// disco, y saber si alguien la ha cambiado por fuera.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SpeakConfig {
     /// Interruptor general. Exige ademas `translate = true` y

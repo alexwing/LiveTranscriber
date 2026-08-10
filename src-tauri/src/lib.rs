@@ -22,16 +22,30 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use asr_core::CONFIG_FILE;
 
 /// Error que viaja al frontend como `{ message }`, igual que en TapoController.
+///
+/// Se construye SIEMPRE por `new`, y `new` lo escribe en el log. Antes estos
+/// errores solo existian en el banner de la interfaz: el usuario copiaba el
+/// mensaje y el log no tenia ni rastro de el, asi que reconstruir que habia
+/// pasado dependia de lo que la persona recordara. Un error que se le enseña
+/// al usuario y no se registra es medio error.
 #[derive(Debug, serde::Serialize)]
 pub struct CmdError {
     pub message: String,
+}
+
+impl CmdError {
+    fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
+        tracing::error!("{message}");
+        Self { message }
+    }
 }
 
 macro_rules! from_display {
     ($($t:ty),* $(,)?) => {$(
         impl From<$t> for CmdError {
             fn from(e: $t) -> Self {
-                Self { message: e.to_string() }
+                Self::new(e.to_string())
             }
         }
     )*};
@@ -47,7 +61,7 @@ from_display!(
 
 impl From<String> for CmdError {
     fn from(message: String) -> Self {
-        Self { message }
+        Self::new(message)
     }
 }
 
@@ -247,11 +261,65 @@ fn get_config(state: tauri::State<'_, AppState>) -> CmdResult<AppConfig> {
     // A nivel debug: la interfaz lo pide en cada montaje y en dev React lo
     // duplica, asi que a nivel info solo seria ruido.
     tracing::debug!("get_config");
-    Ok(state.config.lock().unwrap().clone())
+    Ok(refresh_config(&state))
+}
+
+/// Relee la configuracion del disco y adopta lo que encuentre.
+///
+/// El estado se cargaba UNA vez, al arrancar, y no se volvia a mirar. Eso
+/// tenia dos consecuencias feas: editar el fichero por fuera con la ventana
+/// abierta no hacia nada, y —peor— el siguiente guardado desde la interfaz
+/// escribia encima lo que hubiera en memoria, borrando la edicion externa.
+/// Paso de verdad: se corrigieron a mano unas rutas de Python, la ventana
+/// abierta siguio con las viejas, y arrancar fallaba pidiendo un fichero que
+/// ya no existia.
+///
+/// Si el fichero no parsea se conserva lo que hay en memoria: media
+/// configuracion es peor que una vieja pero entera.
+fn refresh_config(state: &AppState) -> AppConfig {
+    adopt_if_changed(&state.config, &state.config_path)
+}
+
+/// El nucleo de [`refresh_config`], sin `AppState` para poder probarlo.
+fn adopt_if_changed(held: &Mutex<AppConfig>, path: &Path) -> AppConfig {
+    match AppConfig::load(path) {
+        Ok(fresh) => {
+            let mut held = held.lock().unwrap();
+            if *held != fresh {
+                tracing::info!("la configuracion de {} ha cambiado por fuera; adoptada", path.display());
+                *held = fresh;
+            }
+            held.clone()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "no se pudo releer {} ({e}); se sigue con la que hay en memoria",
+                path.display()
+            );
+            held.lock().unwrap().clone()
+        }
+    }
 }
 
 #[tauri::command]
 fn save_config(state: tauri::State<'_, AppState>, new: AppConfig) -> CmdResult<()> {
+    // Si el fichero cambio por fuera desde la ultima vez que lo leimos, lo que
+    // llega de la interfaz no lo tiene en cuenta y lo pisaria. Guardar es lo
+    // que el usuario ha pedido, asi que se guarda, pero antes se aparta una
+    // copia: nada se pierde en silencio.
+    if let Ok(on_disk) = AppConfig::load(&state.config_path) {
+        let held = state.config.lock().unwrap().clone();
+        if on_disk != held && on_disk != new {
+            let backup = state.config_path.with_extension("toml.overwritten");
+            match std::fs::copy(&state.config_path, &backup) {
+                Ok(_) => tracing::warn!(
+                    "la configuracion habia cambiado por fuera; copia en {}",
+                    backup.display()
+                ),
+                Err(e) => tracing::warn!("cambio por fuera y no se pudo copiar: {e}"),
+            }
+        }
+    }
     new.save(&state.config_path)?;
     *state.config.lock().unwrap() = new;
     Ok(())
@@ -275,9 +343,7 @@ fn profiles_file(state: &AppState) -> PathBuf {
 }
 
 fn load_store(state: &AppState) -> Result<asr_core::ProfileStore, CmdError> {
-    asr_core::ProfileStore::load(&profiles_file(state)).map_err(|e| CmdError {
-        message: format!("could not read the profiles: {e}"),
-    })
+    asr_core::ProfileStore::load(&profiles_file(state)).map_err(|e| CmdError::new(format!("could not read the profiles: {e}")))
 }
 
 #[tauri::command]
@@ -295,9 +361,7 @@ fn save_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<Ve
     }
     let mut store = load_store(&state)?;
     store.put(&name, state.config.lock().unwrap().clone());
-    store.save(&profiles_file(&state)).map_err(|e| CmdError {
-        message: format!("could not save the profile: {e}"),
-    })?;
+    store.save(&profiles_file(&state)).map_err(|e| CmdError::new(format!("could not save the profile: {e}")))?;
     Ok(store.names())
 }
 
@@ -338,9 +402,7 @@ fn delete_profile(state: tauri::State<'_, AppState>, name: String) -> CmdResult<
     if !store.remove(&name) {
         return Err(format!("no profile named {name:?}").into());
     }
-    store.save(&profiles_file(&state)).map_err(|e| CmdError {
-        message: format!("could not save the profile list: {e}"),
-    })?;
+    store.save(&profiles_file(&state)).map_err(|e| CmdError::new(format!("could not save the profile list: {e}")))?;
     Ok(store.names())
 }
 
@@ -353,6 +415,9 @@ fn is_running(state: tauri::State<'_, AppState>) -> bool {
 #[tauri::command]
 fn start_transcription(app: AppHandle, state: tauri::State<'_, AppState>) -> CmdResult<()> {
     tracing::info!("arranque pedido desde la interfaz");
+    // Releer AQUI es lo que importa: es el momento en que la configuracion se
+    // convierte en procesos, y una ventana lleva abierta lo que lleve.
+    refresh_config(&state);
     start_internal(&app, &state)
 }
 
@@ -418,17 +483,13 @@ async fn pick_output_dir(
             .blocking_pick_folder()
     })
     .await
-    .map_err(|e| CmdError {
-        message: format!("the folder picker failed: {e}"),
-    })?;
+    .map_err(|e| CmdError::new(format!("the folder picker failed: {e}")))?;
 
     let Some(picked) = picked else {
         return Ok(None); // el usuario cancelo
     };
     // `simplified` deja rutas de Windows normales en vez de UNC.
-    let chosen = picked.simplified().into_path().map_err(|e| CmdError {
-        message: format!("unusable path: {e}"),
-    })?;
+    let chosen = picked.simplified().into_path().map_err(|e| CmdError::new(format!("unusable path: {e}")))?;
 
     std::fs::create_dir_all(&chosen)?;
     let mut config = state.config.lock().unwrap();
@@ -444,9 +505,7 @@ fn reveal_output_dir(state: tauri::State<'_, AppState>) -> CmdResult<()> {
     std::process::Command::new("explorer")
         .arg(&dir)
         .spawn()
-        .map_err(|e| CmdError {
-            message: format!("could not open {}: {e}", dir.display()),
-        })?;
+        .map_err(|e| CmdError::new(format!("could not open {}: {e}", dir.display())))?;
     Ok(())
 }
 
@@ -793,9 +852,7 @@ fn start_translation(
             // voz termina sola despues de decir lo que tenga pendiente.
             tracing::info!("hilo de traduccion terminado");
         })
-        .map_err(|e| CmdError {
-            message: format!("could not spawn the translation thread: {e}"),
-        })?;
+        .map_err(|e| CmdError::new(format!("could not spawn the translation thread: {e}")))?;
 
     Ok(tx)
 }
@@ -920,9 +977,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
                 let _ = event_app.emit("speech-event", &event);
             }
         })
-        .map_err(|e| CmdError {
-            message: format!("could not spawn the speech event thread: {e}"),
-        })?;
+        .map_err(|e| CmdError::new(format!("could not spawn the speech event thread: {e}")))?;
 
     let pump = SpeechPump::new(
         Box::new(sidecar),
@@ -944,9 +999,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     std::thread::Builder::new()
         .name("asr-speech".into())
         .spawn(move || pump.run(text_rx, pump_stop, render_alive))
-        .map_err(|e| CmdError {
-            message: format!("could not spawn the speech thread: {e}"),
-        })?;
+        .map_err(|e| CmdError::new(format!("could not spawn the speech thread: {e}")))?;
 
     Ok(SpeechWiring {
         texts: text_tx,
@@ -1257,4 +1310,56 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error arrancando LiveTranscriber");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Escribe un TOML minimo con la ruta de Python que se le diga.
+    fn write_config(dir: &Path, python: &str) -> PathBuf {
+        let path = dir.join("transcriber-config.toml");
+        std::fs::write(&path, format!("python = '{python}'\n")).expect("escribe");
+        path
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lt-test-{name}"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// Cambiar el fichero por fuera con la aplicacion abierta tiene que verse.
+    ///
+    /// Este test existe por un fallo real: se corrigieron a mano unas rutas de
+    /// Python, la ventana que ya estaba abierta siguio con las viejas en
+    /// memoria, y arrancar fallaba pidiendo un fichero borrado. El estado se
+    /// leia una sola vez y no se volvia a mirar.
+    #[test]
+    fn adopta_lo_que_cambia_por_fuera() {
+        let dir = tmpdir("adopta");
+        let path = write_config(&dir, r"C:\viejo\python.exe");
+        let held = Mutex::new(AppConfig::load(&path).expect("carga"));
+        assert_eq!(held.lock().unwrap().python, PathBuf::from(r"C:\viejo\python.exe"));
+
+        write_config(&dir, r"C:\nuevo\python.exe");
+        let got = adopt_if_changed(&held, &path);
+
+        assert_eq!(got.python, PathBuf::from(r"C:\nuevo\python.exe"));
+        assert_eq!(held.lock().unwrap().python, PathBuf::from(r"C:\nuevo\python.exe"));
+    }
+
+    /// Un fichero a medio escribir no debe dejar la aplicacion sin ajustes:
+    /// media configuracion es peor que una vieja pero entera.
+    #[test]
+    fn un_toml_roto_no_borra_lo_que_hay_en_memoria() {
+        let dir = tmpdir("roto");
+        let path = write_config(&dir, r"C:\bueno\python.exe");
+        let held = Mutex::new(AppConfig::load(&path).expect("carga"));
+
+        std::fs::write(&path, "python = 'sin cerrar\n[speak").expect("escribe basura");
+        let got = adopt_if_changed(&held, &path);
+
+        assert_eq!(got.python, PathBuf::from(r"C:\bueno\python.exe"));
+    }
 }

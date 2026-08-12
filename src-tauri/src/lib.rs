@@ -1232,6 +1232,22 @@ pub fn run() {
     tracing::info!("configuracion en {}", config_path.display());
 
     tauri::Builder::default()
+        // Una sola ventana, y va PRIMERO: el plugin exige ser el primero para
+        // poder abortar la segunda instancia antes de que monte nada.
+        //
+        // Sin esto se podian tener dos abiertas a la vez. Paso de verdad y
+        // costo caro de diagnosticar: una ventana vieja, con la configuracion
+        // anterior en memoria y de una build sin relectura, fallaba al
+        // arrancar; y como las dos escriben en el MISMO fichero de log, el
+        // fallo de la vieja parecia venir de la recien abierta.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tracing::info!("ya habia una instancia; se trae al frente en vez de abrir otra");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1243,14 +1259,30 @@ pub fn run() {
                     tracing::info!("atajo pulsado: {shortcut}");
                     let state = app.state::<AppState>();
                     let config = state.config.lock().unwrap().clone();
-                    let pressed = shortcut.to_string();
 
-                    if pressed == config.hotkey_overlay {
+                    // Comparar PARSEANDO, no como texto. El plugin devuelve
+                    // "shift+control+KeyT" y la configuracion dice
+                    // "CmdOrControl+Shift+T": como cadenas no coinciden nunca,
+                    // asi que los atajos globales se registraban, se recibian
+                    // y no hacian absolutamente nada.
+                    let matches = |accel: &str| {
+                        accel
+                            .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                            .map(|want| &want == shortcut)
+                            .unwrap_or(false)
+                    };
+
+                    if matches(&config.hotkey_overlay) {
                         let _ = toggle_overlay(app.clone());
-                    } else if pressed == config.hotkey_toggle {
+                    } else if matches(&config.hotkey_toggle) {
                         if state.running.load(Ordering::Relaxed) {
                             stop_internal(app, &state);
-                        } else if let Err(e) = start_internal(app, &state) {
+                        } else if let Err(e) = {
+                            // Igual que el boton: releer antes de convertir la
+                            // configuracion en procesos.
+                            refresh_config(&state);
+                            start_internal(app, &state)
+                        } {
                             // Tambien al log: si solo va a la interfaz, un
                             // fallo disparado por el atajo es invisible.
                             tracing::error!("no se pudo arrancar: {}", e.message);

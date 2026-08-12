@@ -25,3 +25,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 tauri-plugin-dialog = "2.7.2"
+# Instancia unica: sin esto se podian tener DOS ventanas abiertas a la vez, una
+# de ellas vieja, escribiendo las dos en el mismo log. Un fallo de la ventana
+# vieja parecia venir de la recien arrancada.
+tauri-plugin-single-instance = "2"

@@ -281,6 +281,28 @@ fn refresh_config(state: &AppState) -> AppConfig {
 }
 
 /// El nucleo de [`refresh_config`], sin `AppState` para poder probarlo.
+/// Identifica el fichero que se acaba de leer: tamaño y fecha.
+///
+/// Existe por un fallo que costo tres intentos: la aplicacion insistia en usar
+/// unas rutas que NO estaban en el fichero que yo inspeccionaba. Habia dos
+/// ficheros en juego y el log no permitia distinguirlos, porque solo decia la
+/// ruta —identica en los dos— y nunca QUE contenia. Con el tamaño y la fecha
+/// se ve al instante si la aplicacion esta leyendo otra cosa.
+fn config_stamp(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let secs = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{} bytes, mtime {secs}", m.len())
+        }
+        Err(e) => format!("sin metadatos: {e}"),
+    }
+}
+
 fn adopt_if_changed(held: &Mutex<AppConfig>, path: &Path) -> AppConfig {
     match AppConfig::load(path) {
         Ok(fresh) => {
@@ -572,7 +594,14 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
             require_existing(app, &sidecar.python, "Python interpreter")
         });
     match resolved {
-        Ok(python) => sidecar.python = python,
+        Ok(python) => {
+            // Decir QUE se va a usar, no solo que fallo si falla. Sin esta
+            // linea, un arranque correcto no dejaba constancia de con que
+            // interprete corria, y comparar "lo que creo que lee" con "lo que
+            // lee" era imposible desde el log.
+            tracing::info!("interprete del ASR: {}", python.display());
+            sidecar.python = python;
+        }
         Err(e) => {
             state.running.store(false, Ordering::SeqCst);
             return Err(e);
@@ -1229,7 +1258,11 @@ pub fn run() {
     let _log_guard = init_logging();
 
     let config_path = config_location();
-    tracing::info!("configuracion en {}", config_path.display());
+    tracing::info!(
+        "configuracion en {} ({})",
+        config_path.display(),
+        config_stamp(&config_path)
+    );
 
     tauri::Builder::default()
         // Una sola ventana, y va PRIMERO: el plugin exige ser el primero para

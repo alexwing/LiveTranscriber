@@ -220,6 +220,18 @@ impl AppState {
         //
         // Ahora se aparta con fecha antes de tocar nada, para que lo que habia
         // siga existiendo aunque la app arranque por defecto.
+        // Arrancar SIN fichero no es lo mismo que arrancar con uno vacio, y
+        // hasta ahora se veian igual: `load` devuelve los valores por defecto
+        // y la aplicacion seguia como si tuviera configuracion, hasta que al
+        // pulsar Arrancar soltaba un error que aconseja reinstalar. Decirlo
+        // aqui, alto, es la diferencia entre un minuto y una tarde.
+        if !config_path.exists() {
+            tracing::warn!(
+                "arrancando SIN fichero de configuracion: {} no existe. \
+                 Se usan valores por defecto, que no traen interprete de Python.",
+                config_path.display()
+            );
+        }
         let config = match AppConfig::load(&config_path) {
             Ok(config) => config,
             Err(e) => {
@@ -304,6 +316,19 @@ fn config_stamp(path: &Path) -> String {
 }
 
 fn adopt_if_changed(held: &Mutex<AppConfig>, path: &Path) -> AppConfig {
+    // Un fichero que NO esta no son "valores por defecto": es un fichero que
+    // no esta. `AppConfig::load` devuelve Ok(default()) en ese caso, asi que
+    // sin esta comprobacion desaparecer el fichero un instante bastaba para
+    // que la aplicacion tirara la configuracion buena que tenia en memoria y
+    // se quedara sin interprete, con un error que ademas aconseja reinstalar.
+    // Paso de verdad. Lo que hay en memoria es mejor que nada.
+    if !path.exists() {
+        tracing::warn!(
+            "{} no existe ahora mismo; se conserva la configuracion en memoria",
+            path.display()
+        );
+        return held.lock().unwrap().clone();
+    }
     match AppConfig::load(path) {
         Ok(fresh) => {
             let mut held = held.lock().unwrap();
@@ -1412,6 +1437,28 @@ mod tests {
 
         assert_eq!(got.python, PathBuf::from(r"C:\nuevo\python.exe"));
         assert_eq!(held.lock().unwrap().python, PathBuf::from(r"C:\nuevo\python.exe"));
+    }
+
+    /// Si el fichero DESAPARECE, lo que hay en memoria se conserva.
+    ///
+    /// `AppConfig::load` devuelve los valores por defecto para un fichero que
+    /// no existe, asi que sin la comprobacion previa un borrado momentaneo
+    /// —o cualquier cosa que lo haga ilegible un instante— tiraba la
+    /// configuracion buena y dejaba la aplicacion sin interprete.
+    #[test]
+    fn si_el_fichero_desaparece_se_conserva_la_memoria() {
+        let dir = tmpdir("desaparece");
+        let path = write_config(&dir, r"C:\bueno\python.exe");
+        let held = Mutex::new(AppConfig::load(&path).expect("carga"));
+
+        std::fs::remove_file(&path).expect("borra");
+        let got = adopt_if_changed(&held, &path);
+
+        assert_eq!(got.python, PathBuf::from(r"C:\bueno\python.exe"));
+        assert_eq!(
+            held.lock().unwrap().python,
+            PathBuf::from(r"C:\bueno\python.exe")
+        );
     }
 
     /// Un fichero a medio escribir no debe dejar la aplicacion sin ajustes:

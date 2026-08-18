@@ -350,11 +350,54 @@ fn adopt_if_changed(held: &Mutex<AppConfig>, path: &Path) -> AppConfig {
 
 #[tauri::command]
 fn save_config(state: tauri::State<'_, AppState>, new: AppConfig) -> CmdResult<()> {
-    // Si el fichero cambio por fuera desde la ultima vez que lo leimos, lo que
-    // llega de la interfaz no lo tiene en cuenta y lo pisaria. Guardar es lo
-    // que el usuario ha pedido, asi que se guarda, pero antes se aparta una
-    // copia: nada se pierde en silencio.
+    save_guarded(&state, new)
+}
+
+/// Guarda la configuracion sin dejar que una ruta VACIA pise una que no lo esta.
+///
+/// Esta guarda existe por una cadena que costo cinco rondas de diagnostico y
+/// que dejaba al usuario sin aplicacion:
+///
+///   1. Los valores por defecto no traen interprete de Python: van vacios a
+///      proposito, para no repartir la ruta de la maquina de quien compilo.
+///   2. Si la aplicacion arranca un instante en que no puede leer el fichero,
+///      se queda con esos valores: interprete VACIO en memoria.
+///   3. Basta entonces tocar cualquier ajuste en la interfaz. `save_config`
+///      serializa el estado ENTERO y escribe encima, asi que la configuracion
+///      buena del disco desaparece y queda una con la ruta vacia.
+///   4. Desde ese momento falla en TODOS los arranques, porque ya es el disco
+///      el que tiene el mal dato.
+///
+/// El paso destructivo es siempre la escritura, asi que la guarda va aqui: si
+/// lo que llega trae una ruta de maquina vacia y el disco tiene una puesta, se
+/// conserva la del disco. El resto del guardado sigue su curso, que es lo que
+/// el usuario ha pedido.
+fn save_guarded(state: &AppState, mut new: AppConfig) -> Result<(), CmdError> {
     if let Ok(on_disk) = AppConfig::load(&state.config_path) {
+        let mut rescatadas: Vec<&str> = Vec::new();
+        if new.python.as_os_str().is_empty() && !on_disk.python.as_os_str().is_empty() {
+            new.python = on_disk.python.clone();
+            rescatadas.push("python");
+        }
+        if new.speak.python.as_os_str().is_empty()
+            && !on_disk.speak.python.as_os_str().is_empty()
+        {
+            new.speak.python = on_disk.speak.python.clone();
+            rescatadas.push("speak.python");
+        }
+        if new.hf_home.is_none() && on_disk.hf_home.is_some() {
+            new.hf_home = on_disk.hf_home.clone();
+            rescatadas.push("hf_home");
+        }
+        if !rescatadas.is_empty() {
+            tracing::warn!(
+                "se iba a guardar sin {}; se conserva lo que hay en {}",
+                rescatadas.join(", "),
+                state.config_path.display()
+            );
+        }
+
+        // Y si ademas habia cambiado por fuera, copia antes de escribir.
         let held = state.config.lock().unwrap().clone();
         if on_disk != held && on_disk != new {
             let backup = state.config_path.with_extension("toml.overwritten");
@@ -437,8 +480,9 @@ fn load_profile(
         asr_core::profiles::apply(&profile.config, &current, &asr_core::DeviceIds::from_system())
     };
 
-    applied.config.save(&state.config_path)?;
-    *state.config.lock().unwrap() = applied.config.clone();
+    // Por la misma guarda: `apply` conserva las rutas de `current`, pero si
+    // `current` venia vacio el guardado las dejaria vacias en el disco.
+    save_guarded(&state, applied.config.clone())?;
     tracing::info!("perfil {name:?} aplicado");
     Ok(applied)
 }
@@ -1458,6 +1502,36 @@ mod tests {
         assert_eq!(
             held.lock().unwrap().python,
             PathBuf::from(r"C:\bueno\python.exe")
+        );
+    }
+
+    /// Guardar con el interprete VACIO no puede borrar el del disco.
+    ///
+    /// Es la cadena que dejo al usuario sin aplicacion cinco veces: un arranque
+    /// que no pudo leer el fichero se queda con los valores por defecto —que no
+    /// traen interprete—, y el primer ajuste que se toque en la interfaz
+    /// serializa ese estado entero y lo escribe encima. A partir de ahi el mal
+    /// dato esta en el disco y falla en todos los arranques.
+    #[test]
+    fn guardar_vacio_no_borra_el_interprete_del_disco() {
+        let dir = tmpdir("guarda");
+        let path = write_config(&dir, r"C:\bueno\python.exe");
+
+        // Lo que tendria en memoria una instancia que arranco a ciegas.
+        let mut a_ciegas = AppConfig::default();
+        a_ciegas.language = "en-US".to_string();
+        assert_eq!(a_ciegas.python, PathBuf::new(), "el defecto va vacio");
+
+        let state = AppState::new(path.clone());
+        save_guarded(&state, a_ciegas).expect("guarda");
+
+        // El ajuste del usuario se guarda; la ruta de la maquina sobrevive.
+        let vuelta = AppConfig::load(&path).expect("recarga");
+        assert_eq!(vuelta.language, "en-US");
+        assert_eq!(
+            vuelta.python,
+            PathBuf::from(r"C:\bueno\python.exe"),
+            "la ruta del disco tenia que conservarse"
         );
     }
 

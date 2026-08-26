@@ -251,23 +251,51 @@ fn config_dir() -> PathBuf {
 
 /// Sitios donde vivia la configuracion antes de que hubiera una ubicacion
 /// canonica, en el orden en que se miraban.
+///
+/// El directorio del ejecutable NO esta en la lista, y su ausencia es
+/// deliberada: es el arreglo de un fallo. Ver [`migrate_legacy_config`].
 fn legacy_config_dirs() -> Vec<PathBuf> {
+    // `exe` tiene que sobrevivir a `exe_dir`, que le presta la ruta.
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    legacy_dirs_from(std::env::current_dir().ok(), exe_dir)
+}
+
+/// El nucleo de [`legacy_config_dirs`], con las dos entradas explicitas: es
+/// la unica forma de probar el caso que de verdad importa sin cambiar el
+/// directorio de trabajo del proceso de test.
+fn legacy_dirs_from(cwd: Option<PathBuf>, exe_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = cwd {
         dirs.push(cwd);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let mut candidate = parent.to_path_buf();
-            for _ in 0..4 {
-                dirs.push(candidate.clone());
-                if !candidate.pop() {
-                    break;
-                }
+    if let Some(dir) = exe_dir {
+        let mut candidate = dir.to_path_buf();
+        for _ in 0..4 {
+            dirs.push(candidate.clone());
+            if !candidate.pop() {
+                break;
             }
         }
     }
     dirs.dedup();
+
+    // Y aqui se cae el directorio del ejecutable, VENGA POR DONDE VENGA.
+    //
+    // Filtrarlo solo de la rama de arriba no bastaba, y por poco se queda
+    // asi: el acceso directo que escribe el instalador lleva
+    // `WorkingDirectory` al directorio de instalacion, asi que al arrancar
+    // desde el menu de inicio —que es como se arranca— ese mismo directorio
+    // entra otra vez por `cwd` y el resto que se pretendia ignorar se
+    // encuentra igual. Se descarta al final, sobre la lista ya montada,
+    // porque es la unica posicion donde no hay una segunda puerta.
+    //
+    // Los directorios POR ENCIMA si se miran: ahi es donde esta el clon del
+    // repositorio de quien tenia su configuracion antes, que es justo a quien
+    // la migracion viene a rescatar.
+    if let Some(exe_dir) = exe_dir {
+        dirs.retain(|dir| dir != exe_dir);
+    }
     dirs
 }
 
@@ -277,6 +305,20 @@ fn legacy_config_dirs() -> Vec<PathBuf> {
 /// arrancaria con la configuracion por defecto y sus dispositivos, idiomas y
 /// muestra de voz se quedarian en un fichero que ya nadie lee. Los perfiles
 /// viajan con ella, que para eso son hermanos.
+///
+/// Lo que NO se migra importa tanto como lo que si:
+///
+/// - **El directorio del ejecutable no se mira.** Un `transcriber-config.toml`
+///   ahi no son los ajustes de nadie: el instalador no lo empaqueta y la
+///   aplicacion escribe en `%APPDATA%`, asi que solo puede ser un resto. Y uno
+///   concreto: las builds anteriores a "Quitar del binario las rutas de mi
+///   maquina" llevaban `E:\projects\...` COMPILADO en los valores por defecto
+///   y, al arrancar sin configuracion, lo escribian junto al .exe. Migrar ese
+///   fichero resucitaba la ruta del portatil del autor en el equipo de otro,
+///   con un instalador que a esas alturas ya estaba limpio: actualizar la
+///   aplicacion bastaba para reintroducir un fallo que ya estaba corregido.
+/// - **Los interpretes que aqui no existen llegan vacios.** Ver
+///   [`blank_missing_interpreters`].
 ///
 /// Devuelve de donde la trajo, si la trajo.
 pub fn migrate_legacy_config() -> Option<PathBuf> {
@@ -291,18 +333,72 @@ pub fn migrate_legacy_config() -> Option<PathBuf> {
         .into_iter()
         .map(|dir| dir.join(CONFIG_FILE))
         .find(|candidate| candidate.is_file())?;
+    migrate_config_from(&source, &target)
+}
 
+/// El nucleo de [`migrate_legacy_config`], con origen y destino explicitos:
+/// asi se puede probar sin depender de donde este el ejecutable ni de que
+/// haya un `%APPDATA%` de verdad.
+fn migrate_config_from(source: &Path, target: &Path) -> Option<PathBuf> {
     let dir = target.parent()?;
     std::fs::create_dir_all(dir).ok()?;
-    std::fs::copy(&source, &target).ok()?;
+    std::fs::copy(source, target).ok()?;
 
     // Los perfiles guardan dispositivos y rutas; perderlos al migrar seria
     // exactamente el fallo que esto viene a evitar.
-    let profiles = crate::profiles_path(&source);
+    let profiles = crate::profiles_path(source);
     if profiles.is_file() {
-        let _ = std::fs::copy(&profiles, crate::profiles_path(&target));
+        let _ = std::fs::copy(&profiles, crate::profiles_path(target));
     }
-    Some(source)
+
+    blank_missing_interpreters(target);
+    Some(source.to_path_buf())
+}
+
+/// Vacia, en la copia recien migrada, los interpretes que en esta maquina no
+/// existen.
+///
+/// Una configuracion que viaja —traida de otro equipo, o heredada de una
+/// instalacion vieja— arrastra rutas de Python que aqui no llevan a ningun
+/// sitio. Propagarlas produce el peor error de los posibles: "no encuentro
+/// `E:\projects\...`", que manda al usuario a buscar un directorio que nunca
+/// tuvo y que no puede crear. Vaciarlas produce el unico accionable: "no hay
+/// Python configurado, ejecuta el instalador".
+///
+/// Se toca solo la COPIA y solo al migrar. El fichero de origen se queda como
+/// estaba, asi que un falso positivo —una unidad de red que no responde justo
+/// en ese arranque— no destruye los ajustes de nadie: siguen donde estaban.
+fn blank_missing_interpreters(target: &Path) {
+    let Ok(mut config) = AppConfig::load(target) else {
+        return;
+    };
+    let mut blanked: Vec<&str> = Vec::new();
+    if !config.python.as_os_str().is_empty() && !config.python.exists() {
+        tracing::warn!(
+            "el interprete migrado no existe aqui ({}); se deja sin configurar",
+            config.python.display()
+        );
+        config.python = PathBuf::new();
+        blanked.push("python");
+    }
+    if !config.speak.python.as_os_str().is_empty() && !config.speak.python.exists() {
+        tracing::warn!(
+            "el interprete de voz migrado no existe aqui ({}); se deja sin configurar",
+            config.speak.python.display()
+        );
+        config.speak.python = PathBuf::new();
+        blanked.push("speak.python");
+    }
+    if blanked.is_empty() {
+        return;
+    }
+    if let Err(e) = config.save(target) {
+        tracing::warn!(
+            "no se pudo reescribir {} sin {:?}: {e}",
+            target.display(),
+            blanked
+        );
+    }
 }
 
 /// Carpeta por defecto: `Documentos\LiveTranscriber` del usuario.
@@ -544,6 +640,168 @@ mod tests {
         let got = config_location();
         unsafe { std::env::remove_var(CONFIG_ENV) };
         assert_eq!(got, wanted);
+    }
+
+    /// El directorio del ejecutable no es sitio del que migrar nada.
+    ///
+    /// Este test existe por un fallo que llego a manos de un usuario. Las
+    /// builds viejas llevaban `E:\projects\...` compilado en los valores por
+    /// defecto y, arrancando sin configuracion, escribian un
+    /// `transcriber-config.toml` con esa ruta JUNTO AL EJECUTABLE. El fallo se
+    /// corrigio en el binario, pero el fichero se quedo en el disco; al
+    /// instalar la version arreglada, la migracion lo encontraba, lo daba por
+    /// ajustes del usuario y lo copiaba a la ubicacion canonica. La ruta del
+    /// portatil del autor volvia a un equipo recien instalado, desde un
+    /// instalador que ya no la llevaba.
+    ///
+    /// Ahi no hay ajustes de nadie que salvar: el instalador no empaqueta ese
+    /// fichero y la aplicacion escribe en `%APPDATA%`.
+    #[test]
+    fn no_se_migra_desde_el_directorio_del_ejecutable() {
+        let exe = std::env::current_exe().expect("hay ejecutable de test");
+        let dir_del_exe = exe.parent().expect("y tiene directorio");
+        assert!(
+            !legacy_config_dirs().contains(&dir_del_exe.to_path_buf()),
+            "el directorio del ejecutable ({}) no puede estar entre los sitios \
+             de los que migrar",
+            dir_del_exe.display()
+        );
+    }
+
+    /// Y tampoco cuando ese directorio llega como directorio de TRABAJO.
+    ///
+    /// Este es el caso real, y el que hace que descartarlo solo de la rama de
+    /// arriba no sirva de nada: el acceso directo que crea el instalador
+    /// lleva `WorkingDirectory` al directorio de instalacion, de modo que al
+    /// arrancar la aplicacion desde el menu de inicio el `cwd` ES el sitio
+    /// donde puede haber quedado el resto.
+    #[test]
+    fn el_directorio_de_trabajo_no_cuela_el_del_ejecutable() {
+        let instalacion = PathBuf::from(r"C:\Users\quien-sea\AppData\Local\LiveTranscriber");
+        let dirs = legacy_dirs_from(Some(instalacion.clone()), Some(&instalacion));
+        assert!(
+            !dirs.contains(&instalacion),
+            "el directorio de instalacion se colo por cwd; se miraron {dirs:?}"
+        );
+        // Pero los de encima siguen ahi: son los del clon del repositorio.
+        assert!(
+            dirs.contains(&PathBuf::from(r"C:\Users\quien-sea\AppData\Local")),
+            "los directorios por encima si deben mirarse; se miraron {dirs:?}"
+        );
+    }
+
+    /// Y aun asi se sigue mirando por encima: es de donde migra el que tenia
+    /// su configuracion en el clon del repositorio, que es a quien la
+    /// migracion viene a rescatar. En desarrollo el binario esta en
+    /// `target/debug` (o `target/debug/deps` al pasar los tests), asi que la
+    /// raiz del proyecto queda entre los ancestros.
+    #[test]
+    fn los_directorios_por_encima_del_ejecutable_si_se_miran() {
+        let exe = std::env::current_exe().expect("hay ejecutable de test");
+        let abuelo = exe
+            .parent()
+            .and_then(|d| d.parent())
+            .expect("hay un nivel por encima");
+        let dirs = legacy_config_dirs();
+        assert!(
+            dirs.contains(&abuelo.to_path_buf()),
+            "{} deberia seguir mirandose; se miraron {:?}",
+            abuelo.display(),
+            dirs
+        );
+    }
+
+    /// Un interprete que aqui no existe llega VACIO, no tal cual.
+    ///
+    /// Con la ruta de otra maquina el error es "no encuentro
+    /// `E:\projects\...`", que manda al usuario a buscar un directorio que
+    /// nunca tuvo. Vacio, el error es "no hay Python configurado, ejecuta el
+    /// instalador", que si se puede obedecer.
+    #[test]
+    fn al_migrar_se_vacia_el_interprete_que_no_existe_aqui() {
+        let raiz = std::env::temp_dir().join("lt-migra-interprete-ausente");
+        let _ = std::fs::remove_dir_all(&raiz);
+        let origen = raiz.join("viejo").join(CONFIG_FILE);
+        let destino = raiz.join("nuevo").join(CONFIG_FILE);
+        std::fs::create_dir_all(origen.parent().unwrap()).expect("crea origen");
+
+        let mut cfg = AppConfig::default();
+        cfg.python = PathBuf::from(r"E:\projects\que-no-existe\.venv\Scripts\python.exe");
+        cfg.speak.python = PathBuf::from(r"E:\projects\tampoco\venv\Scripts\python.exe");
+        cfg.language = "es-ES".to_string();
+        cfg.lookahead = 13;
+        cfg.save(&origen).expect("guarda el origen");
+
+        let vino_de = migrate_config_from(&origen, &destino).expect("migra");
+        assert_eq!(vino_de, origen);
+
+        let migrada = AppConfig::load(&destino).expect("lee la migrada");
+        assert_eq!(migrada.python, PathBuf::new(), "el interprete debia ir vacio");
+        assert_eq!(
+            migrada.speak.python,
+            PathBuf::new(),
+            "el de la voz tambien"
+        );
+        // Lo que NO son rutas de esta maquina viaja intacto: la migracion
+        // existe justo para no perderlo.
+        assert_eq!(migrada.language, "es-ES");
+        assert_eq!(migrada.lookahead, 13);
+
+        // Y el origen se queda como estaba: la migracion copia, no destruye.
+        let original = AppConfig::load(&origen).expect("lee el origen");
+        assert_ne!(original.python, PathBuf::new(), "el origen no se toca");
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// Un interprete que SI existe se migra tal cual: vaciar por sistema seria
+    /// tirar la instalacion buena de quien tenia su configuracion en el clon.
+    #[test]
+    fn al_migrar_se_conserva_el_interprete_que_si_existe() {
+        let raiz = std::env::temp_dir().join("lt-migra-interprete-valido");
+        let _ = std::fs::remove_dir_all(&raiz);
+        let origen = raiz.join("viejo").join(CONFIG_FILE);
+        let destino = raiz.join("nuevo").join(CONFIG_FILE);
+        std::fs::create_dir_all(origen.parent().unwrap()).expect("crea origen");
+
+        // Cualquier fichero que exista sirve: solo se comprueba que este.
+        let interprete = std::env::current_exe().expect("hay ejecutable de test");
+
+        let mut cfg = AppConfig::default();
+        cfg.python = interprete.clone();
+        cfg.save(&origen).expect("guarda el origen");
+
+        migrate_config_from(&origen, &destino).expect("migra");
+
+        let migrada = AppConfig::load(&destino).expect("lee la migrada");
+        assert_eq!(migrada.python, interprete, "no se debia tocar");
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// Los perfiles son hermanos de la configuracion y viajan con ella.
+    #[test]
+    fn los_perfiles_viajan_con_la_configuracion() {
+        let raiz = std::env::temp_dir().join("lt-migra-perfiles");
+        let _ = std::fs::remove_dir_all(&raiz);
+        let origen = raiz.join("viejo").join(CONFIG_FILE);
+        let destino = raiz.join("nuevo").join(CONFIG_FILE);
+        std::fs::create_dir_all(origen.parent().unwrap()).expect("crea origen");
+
+        AppConfig::default().save(&origen).expect("guarda el origen");
+        std::fs::write(
+            crate::profiles_path(&origen),
+            "[[profile]]\nname = \"Reunion\"\n",
+        )
+        .expect("guarda perfiles");
+
+        migrate_config_from(&origen, &destino).expect("migra");
+
+        let migrados =
+            std::fs::read_to_string(crate::profiles_path(&destino)).expect("hay perfiles");
+        assert!(migrados.contains("Reunion"), "el perfil debia viajar");
+
+        let _ = std::fs::remove_dir_all(&raiz);
     }
 
     #[test]

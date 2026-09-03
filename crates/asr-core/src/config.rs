@@ -104,8 +104,9 @@ pub struct SpeakConfig {
     /// `capture_mic = true`: lo que se habla es la traduccion de tu micro.
     pub enabled: bool,
     /// `chatterbox` (tu voz clonada, 23 idiomas, ~3,4 GB de VRAM, en el
-    /// filo de tiempo real) o `kokoro` (voz neutra, 8 idiomas, ~0,6 GB,
-    /// 40x tiempo real).
+    /// filo de tiempo real) o `kokoro` (voz neutra, 7 idiomas, ~0,6 GB,
+    /// 40x tiempo real). Kokoro son 7 y no 8 porque el japones se retiro: su
+    /// G2P necesita pyopenjtalk, sin rueda para Windows. Ver `kokoro_supports`.
     pub engine: String,
     /// Interprete del venv de voz. **No** es el del ASR: el ASR exige
     /// transformers>=5.13 (AutoModelForRNNT) y chatterbox-tts esta probado

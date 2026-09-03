@@ -73,17 +73,29 @@ models, the installer downloads nothing.
 
 ## Step 1 — Install
 
-Without the synthetic voice:
+**From the release**, which is the short way: download the `.exe` from
+[Releases](https://github.com/alexwing/LiveTranscriber/releases), install it, and
+provision from the app's own folder. The installer carries the scripts inside it, so
+there is nothing to clone:
 
 ```powershell
-.\scripts\install.ps1 -InstallPython
+& "$env:LOCALAPPDATA\LiveTranscriber\install.cmd" -InstallPython -WithVoice
 ```
 
-With it:
+**From source**, if you want to build it yourself:
 
 ```powershell
-.\scripts\install.ps1 -InstallPython -WithVoice
+git clone https://github.com/alexwing/LiveTranscriber
+cd LiveTranscriber
+.\install.cmd -InstallPython -WithVoice
 ```
+
+Drop `-WithVoice` if you only want transcription and translation.
+
+Use `install.cmd` and not the `.ps1` directly. A freshly installed Windows has its
+execution policy on `Restricted`, and a file downloaded from the internet carries the
+mark-of-the-web on top of that. Either one stops you at your very first command; a
+`.cmd` is subject to neither.
 
 The voice is opt-in because it costs roughly 11 GB more: it needs a **second Python
 environment** in `.venv-tts`, with its own torch. The ASR sidecar requires
@@ -213,18 +225,20 @@ Pick an engine:
 | Engine | Voice | Languages | VRAM | Speed |
 |---|---|---|---|---|
 | **Chatterbox** | cloned from your sample | 23 | 3.40 GB | 0.84–0.97x on short sentences, 1.02–1.03x on long text |
-| **Kokoro** | preset, neutral | 8 | 0.56 GB | 46.6–47.9x |
+| **Kokoro** | preset, neutral | 7 | 0.56 GB | 46.6–47.9x |
 
 > Both engine measurements come from a **different test bench** than the rest of this
 > document: the same RTX 3060, but driven over the HTTP backend of a separate project,
 > not through this app's own sidecar. Chatterbox covers ar, da, de, el, en, es, fi, fr,
 > he, hi, it, ja, ko, ms, nl, no, pl, pt, ru, sv, sw, tr, zh. Kokoro covers en, es, fr,
-> hi, it, ja, pt, zh — no German, no Russian, no Korean, which is usually what decides
-> the choice.
+> hi, it, pt, zh — no German, no Russian, no Korean, which is usually what decides the
+> choice. Kokoro's Japanese is deliberately not offered: its G2P needs `pyopenjtalk`,
+> which has no Windows wheel and wants the Visual Studio C++ compiler, so shipping it
+> would break the install for everyone in exchange for one language.
 
 The language the voice speaks is whatever your microphone is translated into. It is
 validated before anything is launched: if the target is not among Chatterbox's 23, or
-among Kokoro's 8 with that engine selected, startup fails with a message naming what to
+among Kokoro's 7 with that engine selected, startup fails with a message naming what to
 change.
 
 **With Chatterbox**, give it a sample of your voice: a WAV with 10–30 seconds of clean
@@ -550,15 +564,41 @@ a measurement.
 
 ## Configuration
 
-`transcriber-config.toml`, written by the installer with absolute paths. Installed via MSI
-the app lives in `Program Files`, where a non-admin user cannot write, so the file falls
-back to `%APPDATA%\LiveTranscriber\`. Writability is tested by actually writing a file.
+Everything the app keeps lives in one place, and it is not next to the `.exe`:
 
-Most of it is editable from the Settings tab. Worth knowing about directly:
+```
+%APPDATA%BSLiveTranscriberBS
+    transcriber-config.toml     settings
+    transcriber-profiles.toml   saved profiles
+    logsBS                       one file per day
+```
+
+That is where the installer writes, where `verify.ps1` reads, and where the app looks —
+installed or not. It has to be one agreed location: the installer runs from a cloned
+repository while the installed app runs from `%LOCALAPPDATA%` or `Program Files`, so
+anything derived from "wherever I happen to be" produces two files that never meet.
+`LIVETRANSCRIBER_CONFIG` overrides it for all three, and `npm run app:dev` points it at
+the repository's own TOML so development does not touch your personal settings.
+
+The log matters more than it sounds. The app is built windowed and has no console, so
+that file is the only place its own account of a failure exists — including every error
+the interface shows you, and the size and date of the configuration it actually read.
+That last detail exists because a stale copy of the config once cost several rounds of
+wrong diagnoses.
+
+Only one window runs at a time; launching again brings the existing one to the front.
+Two windows meant one of them could hold settings from before an edit, and both wrote to
+the same log, which made a failure in the old one look like it came from the new.
+
+Most settings are editable from the Settings tab. Worth knowing about directly:
 
 - `hf_home` moves the models out of the default Hugging Face cache. It reaches the
   sidecars as the `HF_HOME` environment variable, which is the only way the Python library
-  sees it. Set it with `install.ps1 -ModelsDir <path>`.
+  sees it. Set it with `install.cmd -ModelsDir <path>`.
+- `python` and `speak.python`, the two interpreter paths. **There is no field for them
+  in the interface**: if they are wrong, run the installer again or edit the file. The app
+  refuses to overwrite a non-empty one with an empty value, which is how a bad startup
+  used to destroy a good configuration.
 - `overlay_enabled`, `hotkey_toggle`, `hotkey_overlay`.
 - The whole `[speak]` section, off by default.
 - Tuning defaults: `gate_drop_db` 25.0, `gate_floor_dbfs` -80.0, `gate_hold_secs` 2.0,
@@ -586,7 +626,7 @@ measured it with the recognizers and the translator on the same card, which is t
 relevant open risk here: the margin over 1.0x is 3%. Almost all of the gap is the ~1
 second of fixed cost per request, and no cache removes it — hence the grouping, and hence
 the lag warning. Kokoro, at ~47x, has no such problem, but it gives up voice cloning and
-covers 8 languages instead of 23.
+covers 7 languages instead of 23.
 
 **All Chatterbox audio carries Resemble AI's Perth watermark.** Imperceptible, but present.
 
@@ -631,6 +671,11 @@ costs whatever the slowest one takes.
 
 ## If something goes wrong
 
+**Start with the log**, at `%APPDATA%\LiveTranscriber\logs\`. It carries every error the
+interface showed you, with a timestamp, plus the size and date of the configuration the
+app actually read and the interpreter it resolved. Most of the table below is faster to
+settle from those three lines than by guessing.
+
 | Symptom | Probable cause |
 |---|---|
 | Transcribes very little or nothing | Windows volume low, or muted. `cargo run -p asr-cli -- level --from system` tells you in two seconds |
@@ -645,6 +690,7 @@ costs whatever the slowest one takes.
 | The voice lag keeps growing | Chatterbox is generating more slowly than you speak. Raise the grouping size, or switch to Kokoro |
 | A device from a profile changed silently | It did not: the app reports every fallback it made, as a visible error |
 | Sentences stop arriving mid-session | A sidecar died. The window is told; the log names which one |
+| `no Python interpreter is configured` | The `python` key is empty. Run the installer again, or set it by hand; the log's first line says which file the app read |
 
 ---
 
@@ -656,23 +702,31 @@ loop with VB-CABLE. The interface has been verified visually across the six view
 the meeting view, the profile round trip, the voice section, the subtitle overlay, the
 language selector and the global shortcut.
 
-**67 unit tests** in `cargo test --workspace` — 54 in `asr-core`, 13 in `asr-audio` —
-covering the gate, the normalizer, sentence splitting, FLORES-200 mapping, the transcript,
-filename generation, configuration round-trips, the echo registry, the voice grouper (in
-both directions: grouping while speaking, immediate while silent), the synthesizer's
-language mapping, profiles with their device fallback and atomic save, and per-source
-translation directions including non-mirrored language pairs.
+**79 unit tests** in `cargo test --workspace` — 62 in `asr-core`, 13 in `asr-audio`,
+4 in the Tauri layer — covering the gate, the normalizer, sentence splitting, FLORES-200
+mapping, the transcript, filename generation, configuration round-trips, the echo
+registry, the voice grouper (in both directions: grouping while speaking, immediate
+while silent), the synthesizer's language mapping, profiles with their device fallback
+and atomic save, and per-source translation directions including non-mirrored pairs.
+
+A handful of those exist because of specific failures and would catch them again: the
+defaults carrying no absolute path from the machine that built the binary, adopting a
+configuration edited from outside, keeping what is in memory when the file is
+momentarily unreadable, refusing to write an empty interpreter path over a good one,
+and never adopting a configuration left behind in the installation directory by an
+older build.
 
 **Not verified:** Chatterbox measured through this app's own sidecar, Chatterbox under
-simultaneous load from the recognizers and the translator, the tray menu and global
-shortcuts under real clicks and key presses beyond one start/stop test, and the `%APPDATA%`
-configuration fallback, which needs a real MSI install to exercise.
+simultaneous load from the recognizers and the translator, and the tray menu under real
+clicks. The global shortcuts *are* verified — `CmdOrControl+Shift+T` starts and stops a
+real session — and so is the `%APPDATA%` configuration path, exercised from an installed
+build.
 
 ---
 
 ## License
 
-MIT for the code in this repository. The models it downloads carry their own licenses —
-see [Limits](#limits).
+[MIT](LICENSE) for the code in this repository. The models it downloads carry their own
+licenses, and one of them is restrictive — see [Limits](#limits).
 
 Findings from the development, kept out of this document: [docs/engineering-notes.md](docs/engineering-notes.md).

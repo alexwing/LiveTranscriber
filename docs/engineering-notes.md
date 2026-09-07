@@ -259,3 +259,33 @@ last sentence was lost every time.
 **Kokoro builds its pipeline lazily.** About 3 seconds on first use, on top of the ~6 s
 load. The sidecar warms it up before reporting `ready`, so the cost does not land on the
 first sentence of a meeting.
+
+## What the latency instrument showed
+
+**A per-stage table beats a stopwatch.** Every stage writes a `tracing` line with
+`target: "latency"`, the sentence id and a stage name, and
+[`scripts/latency_report.py`](../scripts/latency_report.py) joins them into a
+per-sentence table. The id is born in the translator and travels with the sentence
+through the speech channel and into the render loop as a tag on each audio block, so
+`audio_start` is logged from the byte offset where that block's first sample entered the
+device buffer. No callbacks from the audio side were needed.
+
+**`closed` alone hides two waits.** The translator marks a sentence closed when *it*
+reaches the event, not when the recognizer emitted it. One thread serves both sources, so
+a microphone sentence sat 457 ms behind the room's translation and the table showed
+nothing. `Delta` and `SegmentEnd` now carry the wall clock at emission (`Instant` cannot
+be serialized, and these events cross threads and reach the window); the difference at
+the translator is the `wait` column. The idle cut is the same story: the pump that closes
+a paragraph on silence hands the quiet time over on the `SegmentEnd`, and it shows up as
+`idle`, 1.84 s at the 1.8 s default, before anything else starts.
+
+**`since_last_delta` was always zero.** The first version logged the time from the last
+delta to the close, meant to capture how long the recognizer took to decide. For a
+sentence closed by punctuation that is zero by construction: the delta carrying the
+period is the one that closes it. The recognizer's own emission delay is not observable
+from outside the sidecar, so the column was dropped rather than left to mislead.
+
+**Ids restart with the process, the log does not.** The file rolls daily and the counter
+starts at 1 on every launch, so one day's log holds several sessions with colliding ids.
+The report opens a new session whenever an id that was already closed closes again, and
+prints only the last one unless asked for `--all`.

@@ -68,6 +68,9 @@ export interface Entry {
  *  `echo` marca la propia voz sintetica volviendo por la captura del
  *  sistema: no se re-traduce, se pinta atenuada y con etiqueta. */
 export interface TranslatedLine {
+  /** Id de la frase, el mismo que aparece en el log de latencia. 0 o ausente
+   *  en historiales anteriores al campo. */
+  id?: number;
   source: Source;
   paragraph: number;
   at_ms: number;

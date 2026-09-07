@@ -863,7 +863,7 @@ fn start_internal(app: &AppHandle, state: &AppState) -> CmdResult<()> {
 /// mandarle los textos, el registro para reconocer el eco de la propia voz, y
 /// el asidero de parada que se guarda en el estado para que "Parar" calle.
 struct SpeechWiring {
-    texts: std::sync::mpsc::Sender<String>,
+    texts: std::sync::mpsc::Sender<(u64, String)>,
     echo: Option<Arc<EchoRegistry>>,
     stop: Arc<AtomicBool>,
 }
@@ -938,11 +938,16 @@ fn start_translation(
                     // Y los ecos de la propia voz sintetica, tampoco.
                     if let Some(speech) = &speech {
                         if line.source == Source::Mic && !line.echo {
-                            let _ = speech.texts.send(line.translated.clone());
+                            let _ = speech.texts.send((line.id, line.translated.clone()));
                         }
                     }
+                    let id = line.id;
                     transcript.lock().unwrap().push_translation(line.clone());
                     let _ = app.emit("translation", line);
+                    // Ultima etapa del camino de LECTURA: la frase esta en
+                    // pantalla. Para la del microfono, el camino sigue en la
+                    // bomba de voz (speech_rx, synth_*, audio_*).
+                    tracing::info!(target: "latency", id, stage = "emitted");
                 }
             }
             pump.shutdown();
@@ -1024,7 +1029,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     // interfaz como retraso de voz acumulado.
     let render_alive = Arc::new(AtomicBool::new(true));
     let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(32);
+    let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<asr_audio::AudioBlock>(32);
     let (startup_tx, startup_rx) =
         std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     asr_audio::spawn_render(
@@ -1092,7 +1097,7 @@ fn start_speech(app: &AppHandle, config: &AppConfig) -> Result<SpeechWiring, Cmd
     );
 
     let stop = Arc::new(AtomicBool::new(false));
-    let (text_tx, text_rx) = std::sync::mpsc::channel::<String>();
+    let (text_tx, text_rx) = std::sync::mpsc::channel::<(u64, String)>();
     let pump_stop = stop.clone();
     std::thread::Builder::new()
         .name("asr-speech".into())
@@ -1148,10 +1153,10 @@ fn spawn_event_pump(
                     let _ = tx.send(event.clone());
                 }
                 match &event {
-                    SessionEvent::Delta { source, at_ms, text } => {
+                    SessionEvent::Delta { source, at_ms, text, .. } => {
                         transcript.lock().unwrap().push_delta(*source, *at_ms, text);
                     }
-                    SessionEvent::SegmentEnd { source, at_ms } => {
+                    SessionEvent::SegmentEnd { source, at_ms, .. } => {
                         let closed = transcript.lock().unwrap().close_segment(*source, *at_ms);
                         if let Some(entry) = closed {
                             let _ = app.emit("transcript-entry", entry);

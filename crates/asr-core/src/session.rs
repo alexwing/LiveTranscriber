@@ -69,10 +69,28 @@ pub enum SessionEvent {
         source: Source,
         at_ms: u64,
         text: String,
+        /// Reloj de pared (ms desde epoch) del instante en que el motor emitio
+        /// este texto. `at_ms` es tiempo de audio y no sirve para medir cuanto
+        /// espera el evento en las colas: con un solo hilo de traduccion para
+        /// las dos fuentes, una frase del microfono puede quedarse detras de
+        /// la traduccion de la sala, y sin esta marca esa espera no aparece
+        /// en ninguna columna del informe de latencia. `default` para los
+        /// historiales anteriores al campo.
+        #[serde(default)]
+        wall_ms: u64,
     },
     SegmentEnd {
         source: Source,
         at_ms: u64,
+        /// Reloj de pared al emitirse, con el mismo fin que en `Delta`.
+        #[serde(default)]
+        wall_ms: u64,
+        /// Cuantos ms llevaba el texto parado cuando la bomba pidio el corte.
+        /// Es la parte de la latencia que pone `paragraph_idle_secs`: lo que
+        /// se espera para dar por terminado lo que no acabo en punto. Cero
+        /// si el corte lo decidio el motor, no la bomba.
+        #[serde(default)]
+        idle_ms: u64,
     },
     /// Nivel de entrada. `rms` es el crudo, **antes** de normalizar, que es lo
     /// que hay que mirar para saber si el volumen del sistema esta muy bajo.
@@ -91,6 +109,16 @@ pub enum SessionEvent {
     Stopped {
         source: Source,
     },
+}
+
+/// Milisegundos desde epoch, para estampar eventos con reloj de pared. Es lo
+/// que permite comparar instantes entre hilos y procesos distintos; `Instant`
+/// no se puede serializar ni viaja por los canales hacia la interfaz.
+pub fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub struct Session {
@@ -123,6 +151,10 @@ impl Session {
         let last_text_ms = Arc::new(AtomicU64::new(0));
         let paragraph_start_ms = Arc::new(AtomicU64::new(0));
         let has_text = Arc::new(AtomicBool::new(false));
+        // Inactividad del texto con que la bomba pidio el ultimo corte. El
+        // reenviador lo recoge (y lo vacia) al llegar el SegmentEnd, para que
+        // el informe de latencia sepa cuanto de esa frase fue espera a callar.
+        let cut_idle_ms = Arc::new(AtomicU64::new(0));
 
         // Traduce los eventos del motor a eventos de sesion, poniendoles la
         // fuente y el instante. El motor no sabe de donde salio su audio.
@@ -130,6 +162,7 @@ impl Session {
         let fw_last_text = last_text_ms.clone();
         let fw_paragraph_start = paragraph_start_ms.clone();
         let fw_has_text = has_text.clone();
+        let fw_cut_idle = cut_idle_ms.clone();
         let forwarder = std::thread::Builder::new()
             .name("asr-forward".into())
             .spawn(move || {
@@ -161,8 +194,14 @@ impl Session {
                             source,
                             at_ms,
                             text,
+                            wall_ms: epoch_ms(),
                         },
-                        AsrEvent::SegmentEnd => SessionEvent::SegmentEnd { source, at_ms },
+                        AsrEvent::SegmentEnd => SessionEvent::SegmentEnd {
+                            source,
+                            at_ms,
+                            wall_ms: epoch_ms(),
+                            idle_ms: fw_cut_idle.swap(0, Ordering::Relaxed),
+                        },
                         AsrEvent::Error { message } => SessionEvent::Error { source, message },
                     };
                     if forward_out.send(mapped).is_err() {
@@ -212,6 +251,7 @@ impl Session {
                         if quiet >= idle_ms || length >= max_ms {
                             // El motor confirmara con su propio SegmentEnd, que
                             // es quien pone `has_text` a false.
+                            cut_idle_ms.store(quiet, Ordering::Relaxed);
                             if let Err(e) = engine.reset() {
                                 let _ = out.send(SessionEvent::Error {
                                     source,

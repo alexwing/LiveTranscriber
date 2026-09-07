@@ -30,7 +30,7 @@ pub use capture::{spawn_capture, CaptureTarget};
 pub use device::{list_devices, AudioDevice, DeviceKind};
 pub use gate::{rms, GateEvent, SilenceGate};
 pub use normalize::Normalizer;
-pub use render::spawn_render;
+pub use render::{spawn_render, AudioBlock};
 
 /// Frecuencia de muestreo que exige el modelo.
 pub const TARGET_RATE: u32 = 16_000;

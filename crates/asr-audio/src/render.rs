@@ -24,6 +24,28 @@ use crate::Result;
 #[cfg(windows)]
 const EVENT_TIMEOUT_MS: u32 = 200;
 
+/// Un bloque de audio a reproducir, con las etiquetas de a quien pertenece.
+///
+/// `tags` son identificadores opacos para este crate: quien encola sabe que
+/// frases van dentro (un bloque agrupa varias), y este hilo solo los repite en
+/// el log de latencia cuando el bloque **empieza** y **termina** de escribirse
+/// al dispositivo. Asi el camino "hablo -> me oyen" queda medido de punta a
+/// punta sin que la salida de audio tenga que saber nada de frases. Vacio
+/// cuando a nadie le importa (el banco de pruebas de la CLI, por ejemplo).
+pub struct AudioBlock {
+    pub tags: Vec<u64>,
+    pub samples: Vec<f32>,
+}
+
+impl From<Vec<f32>> for AudioBlock {
+    fn from(samples: Vec<f32>) -> Self {
+        Self {
+            tags: Vec::new(),
+            samples,
+        }
+    }
+}
+
 /// Arranca la reproduccion en su propio hilo.
 ///
 /// - `device_id`: dispositivo de salida, `None` = el predeterminado. Para el
@@ -47,7 +69,7 @@ pub fn spawn_render(
     device_id: Option<String>,
     sample_rate: u32,
     running: Arc<AtomicBool>,
-    rx: Receiver<Vec<f32>>,
+    rx: Receiver<AudioBlock>,
     queued: Arc<AtomicU64>,
     startup: SyncSender<std::result::Result<(), String>>,
 ) -> Result<JoinHandle<()>> {
@@ -75,7 +97,7 @@ pub fn spawn_render(
     _device_id: Option<String>,
     _sample_rate: u32,
     _running: Arc<AtomicBool>,
-    _rx: Receiver<Vec<f32>>,
+    _rx: Receiver<AudioBlock>,
     _queued: Arc<AtomicU64>,
     _startup: SyncSender<std::result::Result<(), String>>,
 ) -> Result<JoinHandle<()>> {
@@ -122,12 +144,48 @@ fn render_loop(
     device_id: Option<&str>,
     sample_rate: u32,
     running: &AtomicBool,
-    rx: &Receiver<Vec<f32>>,
+    rx: &Receiver<AudioBlock>,
     queued: &AtomicU64,
     startup: &SyncSender<std::result::Result<(), String>>,
 ) -> Result<()> {
     use std::collections::VecDeque;
     use wasapi::WasapiError;
+
+    /// Que tramo de `raw` pertenece a que bloque, en orden de llegada.
+    struct Segment {
+        tags: Vec<u64>,
+        /// Bytes de este bloque que aun no se han escrito al dispositivo.
+        remaining: usize,
+        started: bool,
+    }
+
+    /// Descuenta `bytes` recien escritos de los bloques por orden, y anota en
+    /// el log de latencia el primero y el ultimo byte de cada uno. "Escrito al
+    /// dispositivo" no es "sonando por el altavoz": WASAPI compartido anade su
+    /// propio bufer, del orden de 10-30 ms. Es constante y pequeno, asi que se
+    /// ignora a proposito; medirlo exigiria la posicion de reloj del stream.
+    fn mark_written(segments: &mut VecDeque<Segment>, mut bytes: usize) {
+        while bytes > 0 {
+            let Some(seg) = segments.front_mut() else {
+                break;
+            };
+            if !seg.started {
+                seg.started = true;
+                for id in &seg.tags {
+                    tracing::info!(target: "latency", id = *id, stage = "audio_start");
+                }
+            }
+            let take = bytes.min(seg.remaining);
+            seg.remaining -= take;
+            bytes -= take;
+            if seg.remaining == 0 {
+                for id in &seg.tags {
+                    tracing::info!(target: "latency", id = *id, stage = "audio_end");
+                }
+                segments.pop_front();
+            }
+        }
+    }
 
     let (client, event, render) = match open_render(device_id, sample_rate) {
         Ok(opened) => {
@@ -146,6 +204,10 @@ fn render_loop(
 
     // Bytes pendientes de escribir al dispositivo, ya en formato de cable.
     let mut raw: VecDeque<u8> = VecDeque::with_capacity(64 * 1024);
+    // Siempre se apunta el bloque, tenga etiquetas o no: si se saltara uno,
+    // los bytes de los siguientes quedarian desplazados y las marcas
+    // caerian en la frase equivocada.
+    let mut segments: VecDeque<Segment> = VecDeque::new();
     let mut source_alive = true;
 
     while running.load(Ordering::Relaxed) {
@@ -154,10 +216,15 @@ fn render_loop(
         loop {
             match rx.try_recv() {
                 Ok(block) => {
-                    raw.reserve(block.len() * 4);
-                    for sample in block {
+                    raw.reserve(block.samples.len() * 4);
+                    for sample in &block.samples {
                         raw.extend(sample.to_le_bytes());
                     }
+                    segments.push_back(Segment {
+                        tags: block.tags,
+                        remaining: block.samples.len() * 4,
+                        started: false,
+                    });
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -179,6 +246,8 @@ fn render_loop(
         let frames = available.min(raw.len() / 4);
         if frames > 0 {
             render.write_to_device_from_deque(frames, &mut raw, None)?;
+            // Mono f32: cuatro bytes por frame, el mismo divisor que arriba.
+            mark_written(&mut segments, frames * 4);
             // Restar lo escrito del contador de pendientes. `saturating` por
             // si quien encola y quien escribe se cruzan en el arranque.
             let _ = queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {

@@ -32,6 +32,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use asr_audio::AudioBlock;
+
 use crate::engine::{EngineError, Result};
 
 const FRAME_CONTROL: u8 = 0x02;
@@ -266,10 +268,12 @@ const ECHO_GRACE: Duration = Duration::from_secs(10);
 pub struct SpeechPump {
     synth: Box<dyn Synthesizer>,
     cfg: SpeechPumpConfig,
-    /// Textos pendientes de agrupar, con el instante en que llego el primero.
-    pending: Vec<String>,
+    /// Textos pendientes de agrupar, cada uno con el id de su frase, y el
+    /// instante en que llego el primero. El id viaja con el texto hasta el
+    /// bloque de audio para que el log de latencia pueda seguir la frase.
+    pending: Vec<(u64, String)>,
     oldest: Option<Instant>,
-    render_tx: SyncSender<Vec<f32>>,
+    render_tx: SyncSender<AudioBlock>,
     /// Muestras encoladas y aun no escritas al dispositivo. Lo comparte con
     /// el hilo de render, que es quien resta.
     queued_samples: Arc<AtomicU64>,
@@ -283,7 +287,7 @@ impl SpeechPump {
     pub fn new(
         synth: Box<dyn Synthesizer>,
         cfg: SpeechPumpConfig,
-        render_tx: SyncSender<Vec<f32>>,
+        render_tx: SyncSender<AudioBlock>,
         queued_samples: Arc<AtomicU64>,
         rate: u32,
         echo: Option<Arc<EchoRegistry>>,
@@ -310,7 +314,7 @@ impl SpeechPump {
     /// exactamente "crees que te oyen y no te oye nadie").
     pub fn run(
         mut self,
-        rx: Receiver<String>,
+        rx: Receiver<(u64, String)>,
         stop: Arc<AtomicBool>,
         render_alive: Arc<AtomicBool>,
     ) {
@@ -334,13 +338,14 @@ impl SpeechPump {
             // Despertar aunque no llegue texto: el plazo del agrupador corre
             // aunque nadie diga nada nuevo.
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(text) => {
+                Ok((id, text)) => {
                     let text = text.trim().to_string();
                     if !text.is_empty() {
+                        tracing::info!(target: "latency", id, stage = "speech_rx");
                         if self.pending.is_empty() {
                             self.oldest = Some(Instant::now());
                         }
-                        self.pending.push(text);
+                        self.pending.push((id, text));
                         self.emit_queue();
                     }
                 }
@@ -392,7 +397,7 @@ impl SpeechPump {
         if self.queued_samples.load(Ordering::Relaxed) == 0 {
             return true;
         }
-        let chars: usize = self.pending.iter().map(|t| t.len()).sum();
+        let chars: usize = self.pending.iter().map(|(_, t)| t.len()).sum();
         if chars >= self.cfg.group_max_chars {
             return true;
         }
@@ -403,7 +408,27 @@ impl SpeechPump {
     /// Sintetiza y encola lo agrupado. Devuelve `false` cuando ya no tiene
     /// sentido seguir (el sidecar murio o la salida de audio se cerro).
     fn flush(&mut self) -> bool {
-        let block = self.pending.join(" ");
+        let block: String = self
+            .pending
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tags: Vec<u64> = self.pending.iter().map(|(id, _)| *id).collect();
+
+        // La distancia speech_rx -> synth_start es la espera del agrupador;
+        // `grouped` dice cuantas frases pagan juntas el coste fijo del motor.
+        let waited_ms = self.oldest.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+        for id in &tags {
+            tracing::info!(
+                target: "latency",
+                id = *id,
+                stage = "synth_start",
+                grouped = tags.len(),
+                waited_ms,
+                chars = block.len(),
+            );
+        }
 
         let synthesized = match self.synth.synthesize(&block, &self.cfg.lang) {
             // Sidecar muerto: irrecuperable. Hay que mirar tambien `Io`, no
@@ -452,6 +477,15 @@ impl SpeechPump {
         }
 
         let audio_ms = (synthesized.samples.len() as u64 * 1000) / self.rate.max(1) as u64;
+        for id in &tags {
+            tracing::info!(
+                target: "latency",
+                id = *id,
+                stage = "synth_done",
+                synth_ms = synthesized.synth_ms,
+                audio_ms,
+            );
+        }
 
         // El registro de eco se apunta ANTES de encolar: en cuanto el audio
         // empiece a sonar, el ASR puede empezar a oirlo.
@@ -464,7 +498,11 @@ impl SpeechPump {
 
         self.queued_samples
             .fetch_add(synthesized.samples.len() as u64, Ordering::Relaxed);
-        if self.render_tx.send(synthesized.samples).is_err() {
+        let audio = AudioBlock {
+            tags,
+            samples: synthesized.samples,
+        };
+        if self.render_tx.send(audio).is_err() {
             tracing::error!("la salida de audio se cerro, parando la voz");
             let _ = self.events.send(SpeechEvent::Error {
                 message: "the audio output closed; the voice goes mute \
@@ -868,7 +906,7 @@ mod tests {
 
     fn pump_for_test(
         queued: Arc<AtomicU64>,
-        render_tx: SyncSender<Vec<f32>>,
+        render_tx: SyncSender<AudioBlock>,
     ) -> (SpeechPump, std::sync::mpsc::Receiver<SpeechEvent>) {
         let (event_tx, event_rx) = channel();
         let pump = SpeechPump::new(
@@ -891,15 +929,15 @@ mod tests {
     fn con_la_voz_callada_la_primera_frase_no_espera_al_agrupador() {
         // Esperar 2 s de agrupado con la cola vacia seria latencia pura.
         let queued = Arc::new(AtomicU64::new(0));
-        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(4);
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<AudioBlock>(4);
         let (pump, _events) = pump_for_test(queued, render_tx);
 
-        let (text_tx, text_rx) = channel::<String>();
+        let (text_tx, text_rx) = channel::<(u64, String)>();
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let handle = std::thread::spawn(move || pump.run(text_rx, stop, alive));
 
-        text_tx.send("Hola.".to_string()).expect("envia");
+        text_tx.send((1, "Hola.".to_string())).expect("envia");
         // Mucho antes del group_max_wait_ms de 2000 tiene que haber audio.
         let audio = render_rx.recv_timeout(Duration::from_millis(700));
         assert!(audio.is_ok(), "la frase deberia sintetizarse sin esperar");
@@ -913,15 +951,15 @@ mod tests {
         // Simula voz aun sonando: el contador de muestras pendientes no esta
         // a cero, asi que una frase corta debe esperar a agrupar.
         let queued = Arc::new(AtomicU64::new(48_000)); // 2 s sin reproducir
-        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(4);
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<AudioBlock>(4);
         let (pump, _events) = pump_for_test(queued, render_tx);
 
-        let (text_tx, text_rx) = channel::<String>();
+        let (text_tx, text_rx) = channel::<(u64, String)>();
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let handle = std::thread::spawn(move || pump.run(text_rx, stop, alive));
 
-        text_tx.send("Hola.".to_string()).expect("envia");
+        text_tx.send((1, "Hola.".to_string())).expect("envia");
         let audio = render_rx.recv_timeout(Duration::from_millis(700));
         assert!(
             audio.is_err(),

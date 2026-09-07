@@ -508,6 +508,18 @@ implemented yet** — it is written up as pending work in `PLAN_TTS.md`.
 
 RTX 3060 12 GB, Windows 11.
 
+Every stage of the pipeline stamps the log with a sentence id and a stage name, so a
+session can be turned into a per-sentence latency table after the fact:
+
+```powershell
+python scripts\latency_report.py
+```
+
+It reads the newest log and prints, for each sentence, how long it spent between the
+recognizer closing it, the translator returning, the voice starting to synthesize, and
+the first byte reaching the output device — with medians and p90 across the session.
+The numbers below for the voice come from that tool, not from a separate bench.
+
 ### Recognition
 
 | lookahead | latency | RTFx |
@@ -523,7 +535,9 @@ stopwatch** — it is the value the model itself declares, which the sidecar re-
 
 ### Translation
 
-~160 ms per **sentence**, 1.27 GB of VRAM, with a hard 30-second timeout per sentence.
+~160 ms per **sentence** in isolation; 190–950 ms measured inside the running pipeline
+with both recognizers on the card (see the voice section below). 1.27 GB of VRAM, with a
+hard 30-second timeout per sentence.
 
 Translation runs sentence by sentence, cut on punctuation, and is grouped by paragraph
 only for display. Not for latency: NLLB is trained at sentence level and hands a paragraph
@@ -541,8 +555,22 @@ The only figure measured through this app's own sidecar and the full loop: Kokor
 Spanish, 5.15 seconds of audio generated in 1,233 ms — 4.18x — and played back over WASAPI
 in exactly 5.15 seconds. Kokoro hot in this sidecar is 103 ms per request.
 
-There is **no** end-to-end measurement of Chatterbox through this app's sidecar, and none
-of Chatterbox running while the recognizers and the translator are also on the card.
+Chatterbox through this app's sidecar, with both recognizers and the translator on the
+same card at the same time, comes out slower than the isolated bench: 0.71x–1.05x real
+time across six cloned-voice sentences in three runs. Short sentences pay a fixed cost and
+sit near 0.7–0.8x; from about 170 characters they reach 1.0x. Synthesis was 85–94% of the
+microphone path's latency: 5.9 s from the recognizer closing a 62-character sentence to
+its first byte on the output device, 12.6 s for 211 characters.
+
+The same runs put numbers on three waits that no bench shows. Cutting a paragraph on
+silence costs `paragraph_idle_secs` before translation even starts — 1.84 s measured at the
+1.8 s default. The translator is one thread for both sources, so a microphone sentence
+queues behind the room's translation — 457 ms in one case. And the voice is serial end to
+end: a short sentence that arrived while a long one was being synthesized waited 5.5 s for
+the synthesizer, 2.0 s for grouping and 5.0 s for the previous audio to finish playing —
+17.7 s in total for 38 characters. Translation itself was 190–950 ms per sentence: the
+first call of a session costs about 750 ms, short sentences about 200 ms after that, and
+200–270 characters 650–950 ms.
 
 ### VRAM
 
@@ -716,11 +744,11 @@ momentarily unreadable, refusing to write an empty interpreter path over a good 
 and never adopting a configuration left behind in the installation directory by an
 older build.
 
-**Not verified:** Chatterbox measured through this app's own sidecar, Chatterbox under
-simultaneous load from the recognizers and the translator, and the tray menu under real
-clicks. The global shortcuts *are* verified — `CmdOrControl+Shift+T` starts and stops a
-real session — and so is the `%APPDATA%` configuration path, exercised from an installed
-build.
+**Not verified:** the tray menu under real clicks. Everything else that used to sit in
+this list has since been measured: Chatterbox through this app's own sidecar and under
+simultaneous load (see [Measured performance](#measured-performance) — it came out
+slower than the isolated bench), the global shortcuts (`CmdOrControl+Shift+T` starts and
+stops a real session), and the `%APPDATA%` configuration path from an installed build.
 
 ---
 

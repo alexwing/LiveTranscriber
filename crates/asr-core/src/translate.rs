@@ -185,6 +185,12 @@ impl SentenceSplitter {
 /// pero se sigue viendo por parrafos.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranslatedLine {
+    /// Identificador de la frase, unico en la sesion. Es lo que permite seguir
+    /// una frase por el log de latencia desde que se cierra hasta que suena:
+    /// el mismo numero aparece en cada etapa (`target: "latency"`). `default`
+    /// para que los historiales de antes de este campo sigan cargando.
+    #[serde(default)]
+    pub id: u64,
     pub source: asr_audio::Source,
     pub paragraph: u64,
     pub at_ms: u64,
@@ -230,6 +236,9 @@ pub struct TranslationPump {
     /// El sidecar se murio y ya no va a traducir nada mas. Ver
     /// [`Self::is_dead`].
     dead: bool,
+    /// Siguiente [`TranslatedLine::id`]. Empieza en 1: el 0 es el `default`
+    /// de los historiales viejos, y conviene que no coincida con nada real.
+    next_id: u64,
 }
 
 #[derive(Default)]
@@ -265,6 +274,7 @@ impl TranslationPump {
             mic_pair: (code(micro.0, "el micro en")?, code(micro.1, "el micro a")?),
             echo: None,
             dead: false,
+            next_id: 1,
         })
     }
 
@@ -290,7 +300,12 @@ impl TranslationPump {
         use crate::session::SessionEvent as Ev;
 
         match event {
-            Ev::Delta { source, at_ms, text } => {
+            Ev::Delta {
+                source,
+                at_ms,
+                text,
+                wall_ms,
+            } => {
                 let next = self.next_paragraph;
                 let state = self.state.entry(*source).or_insert_with(|| SourceState {
                     paragraph: next,
@@ -302,9 +317,17 @@ impl TranslationPump {
                 }
                 let sentences = state.splitter.push(text);
                 let (paragraph, start_ms) = (state.paragraph, state.at_ms);
-                self.translate_all(*source, paragraph, start_ms, sentences)
+                // Cerrada por el propio texto: no hubo espera a callar (0).
+                self.translate_all(
+                    *source, paragraph, start_ms, sentences, "punct", 0, *wall_ms,
+                )
             }
-            Ev::SegmentEnd { source, .. } => {
+            Ev::SegmentEnd {
+                source,
+                wall_ms,
+                idle_ms,
+                ..
+            } => {
                 let Some(state) = self.state.get_mut(source) else {
                     return Vec::new();
                 };
@@ -312,7 +335,9 @@ impl TranslationPump {
                 // siempre acaba en una frase bien cerrada.
                 let rest: Vec<String> = state.splitter.flush().into_iter().collect();
                 let (paragraph, start_ms) = (state.paragraph, state.at_ms);
-                let out = self.translate_all(*source, paragraph, start_ms, rest);
+                let out = self.translate_all(
+                    *source, paragraph, start_ms, rest, "flush", *idle_ms, *wall_ms,
+                );
                 // El siguiente parrafo de esta fuente empieza de cero.
                 self.state.remove(source);
                 out
@@ -324,15 +349,45 @@ impl TranslationPump {
     /// Traduce frase a frase. NLLB esta entrenado a nivel de frase: con un
     /// parrafo entero se come contenido (medido: de "…capturar el audio del
     /// sistema. Eso ya funciona bien." solo devolvia la primera).
+    ///
+    /// `closed_by` dice por que se cerro la frase: `"punct"` si el propio
+    /// texto traia el punto, `"flush"` si hubo que esperar al fin del segmento.
+    /// Las otras dos son la primera marca del log de latencia: `idle_ms` es lo
+    /// que se espero a que el hablante callara antes de cortar (solo en
+    /// `flush`), y `event_wall_ms` el reloj de pared con que el motor emitio
+    /// el evento que cierra la frase; la diferencia con ahora es lo que ese
+    /// evento espero en cola antes de que esta bomba —un solo hilo para las
+    /// dos fuentes— llegara a el.
+    #[allow(clippy::too_many_arguments)]
     fn translate_all(
         &mut self,
         source: asr_audio::Source,
         paragraph: u64,
         at_ms: u64,
         sentences: Vec<String>,
+        closed_by: &'static str,
+        idle_ms: u64,
+        event_wall_ms: u64,
     ) -> Vec<TranslatedLine> {
         let mut out = Vec::new();
+        // Los historiales viejos no traen reloj (0): no hay espera que medir.
+        let queue_wait_ms = match event_wall_ms {
+            0 => 0,
+            w => crate::session::epoch_ms().saturating_sub(w),
+        };
         for sentence in sentences {
+            let id = self.next_id;
+            self.next_id += 1;
+            tracing::info!(
+                target: "latency",
+                id,
+                stage = "closed",
+                source = ?source,
+                closed_by,
+                idle_ms,
+                queue_wait_ms,
+                chars = sentence.len(),
+            );
             // La propia voz sintetica volviendo no se re-traduce: es->en->es
             // nunca devuelve lo que se dijo. Se deja la frase tal cual,
             // marcada, y la interfaz decide como pintarla. Se comprueba en
@@ -344,6 +399,7 @@ impl TranslationPump {
             if let Some(echo) = &self.echo {
                 if echo.matches(&sentence) {
                     out.push(TranslatedLine {
+                        id,
                         source,
                         paragraph,
                         at_ms,
@@ -360,15 +416,25 @@ impl TranslationPump {
                 asr_audio::Source::System => &self.system_pair,
                 asr_audio::Source::Mic => &self.mic_pair,
             };
+            let started = Instant::now();
             match self.translator.translate(&sentence, src, tgt) {
-                Ok(translated) => out.push(TranslatedLine {
-                    source,
-                    paragraph,
-                    at_ms,
-                    original: sentence,
-                    translated,
-                    echo: false,
-                }),
+                Ok(translated) => {
+                    tracing::info!(
+                        target: "latency",
+                        id,
+                        stage = "translated",
+                        translate_ms = started.elapsed().as_millis() as u64,
+                    );
+                    out.push(TranslatedLine {
+                        id,
+                        source,
+                        paragraph,
+                        at_ms,
+                        original: sentence,
+                        translated,
+                        echo: false,
+                    })
+                }
                 // El sidecar muerto es irrecuperable: sin distinguirlo, cada
                 // frase siguiente se perderia con solo un warn en el log,
                 // para siempre y sin que nadie se entere — ni la pantalla ni
@@ -704,6 +770,7 @@ mod tests {
             source,
             at_ms: 0,
             text: text.to_string(),
+            wall_ms: crate::session::epoch_ms(),
         }
     }
 

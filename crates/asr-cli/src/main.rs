@@ -534,7 +534,7 @@ fn speak(args: SpeakArgs) -> Result<()> {
 
     let running = Arc::new(AtomicBool::new(true));
     let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (tx, rx) = sync_channel::<Vec<f32>>(4);
+    let (tx, rx) = sync_channel::<asr_audio::AudioBlock>(4);
     let (startup_tx, startup_rx) = sync_channel::<std::result::Result<(), String>>(1);
     queued.fetch_add(synthesized.samples.len() as u64, Ordering::Relaxed);
     let handle = asr_audio::spawn_render(
@@ -555,7 +555,7 @@ fn speak(args: SpeakArgs) -> Result<()> {
         Err(_) => anyhow::bail!("the audio output did not respond on open"),
     }
 
-    tx.send(synthesized.samples)?;
+    tx.send(synthesized.samples.into())?;
     drop(tx); // el hilo de render termina solo cuando acabe de reproducir
     println!("playing...");
     let _ = handle.join();

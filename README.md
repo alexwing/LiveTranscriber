@@ -185,6 +185,12 @@ Under **Sources**, pick the two capture devices:
 Both can run at once. That is two independent sessions, each with its own Python process
 and its own copy of the ASR model in VRAM.
 
+If a chosen device is not there when you start (a USB microphone moved to another port
+gets a new id; an unplugged one disappears), the app does not stop: it captures from the
+Windows default instead and says so in the window, naming the device it is actually
+using. The log names the device opened for every capture, so "why does it hear me worse
+today" has an answer.
+
 ### 2.3 — Languages: there are four slots, not one
 
 Translation here is bidirectional. There are four independent language slots:

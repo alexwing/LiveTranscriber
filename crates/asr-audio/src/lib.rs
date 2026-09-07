@@ -26,7 +26,7 @@ mod gate;
 mod normalize;
 mod render;
 
-pub use capture::{spawn_capture, CaptureTarget};
+pub use capture::{spawn_capture, CaptureOpened, CaptureTarget, OnOpen};
 pub use device::{list_devices, AudioDevice, DeviceKind};
 pub use gate::{rms, GateEvent, SilenceGate};
 pub use normalize::Normalizer;

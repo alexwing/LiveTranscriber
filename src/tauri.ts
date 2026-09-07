@@ -150,6 +150,8 @@ export type SessionEvent =
   | { kind: "segment_end"; source: Source; at_ms: number }
   | { kind: "level"; source: Source; rms: number; gain: number; gain_at_ceiling: boolean }
   | { kind: "error"; source: Source; message: string }
+  /** El dispositivo configurado no existe; se captura con `using` en su lugar. */
+  | { kind: "device_fallback"; source: Source; wanted: string; using: string }
   | { kind: "stopped"; source: Source };
 
 /** Eventos que llegan por `speech-event` (voz sintetica). `queued_ms` es el

@@ -164,6 +164,11 @@ export default function App() {
           case "error":
             setError(payload.message);
             break;
+          case "device_fallback":
+            // Va al banner de error y no a la linea de estado: la de estado la
+            // pisa "Motor listo" segundos despues y nadie llegaria a leerlo.
+            setError(tRef.current.deviceFallback(payload.source, payload.using));
+            break;
           case "stopped":
             setStatus(tRef.current.sessionStopped);
             break;

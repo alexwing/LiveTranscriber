@@ -80,6 +80,8 @@ const es = {
   profileDeleted: (name: string) => `Perfil "${name}" borrado`,
   profileFallbacks: (name: string, what: string) =>
     `Perfil "${name}" aplicado, pero estos dispositivos ya no existen y han pasado al predeterminado: ${what}. Revisalos en Fuentes.`,
+  deviceFallback: (source: string, using: string) =>
+    `${source === "mic" ? "El microfono" : "El dispositivo de salida"} configurado no esta conectado. Se esta usando "${using}". Elige otro en Fuentes.`,
   profilesNote1:
     "Un perfil guarda TODO lo de esta pestana: idiomas, fuentes y sus dispositivos, la voz, los parrafos y la carpeta de salida. Repetir un nombre actualiza ese perfil con lo que tengas ahora.",
   profilesNote2:
@@ -294,6 +296,8 @@ const en: Strings = {
   profileDeleted: (name) => `Profile "${name}" deleted`,
   profileFallbacks: (name, what) =>
     `Profile "${name}" applied, but these devices no longer exist and fell back to the default: ${what}. Check them under Sources.`,
+  deviceFallback: (source, using) =>
+    `${source === "mic" ? "The configured microphone" : "The configured output device"} is not connected. Using "${using}" instead. Pick another one under Sources.`,
   profilesNote1:
     "A profile saves EVERYTHING on this tab: languages, sources and their devices, the voice, paragraphs and the output folder. Reusing a name updates that profile with what you have now.",
   profilesNote2:

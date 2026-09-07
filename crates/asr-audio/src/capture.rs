@@ -35,19 +35,36 @@ pub enum CaptureTarget {
     Process { pid: u32, include_children: bool },
 }
 
+/// Que dispositivo acabo abriendo la captura. Si `fallback_from` trae algo, es
+/// el id que se pidio y no existia; `device_name`/`device_id` describen
+/// entonces el predeterminado que se abrio en su lugar.
+#[derive(Debug, Clone)]
+pub struct CaptureOpened {
+    pub device_name: String,
+    pub device_id: String,
+    pub fallback_from: Option<String>,
+}
+
+/// Aviso de que la captura ya esta abierta, con el dispositivo real. Se llama
+/// desde el hilo de captura, una sola vez, justo despues de arrancar el stream.
+pub type OnOpen = Box<dyn FnOnce(CaptureOpened) + Send + 'static>;
+
 /// Arranca la captura en su propio hilo. El hilo termina cuando `running` pasa
 /// a false, cuando el receptor del canal desaparece, o ante un error de WASAPI
 /// (en cuyo caso deja `running` en false para que quien mande se entere).
+/// `on_open` recibe el dispositivo que se abrio de verdad; interesa cuando el
+/// configurado no existia y se ha caido al predeterminado.
 #[cfg(windows)]
 pub fn spawn_capture(
     target: CaptureTarget,
     running: Arc<AtomicBool>,
     tx: SyncSender<Vec<f32>>,
+    on_open: Option<OnOpen>,
 ) -> Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("asr-capture".into())
         .spawn(move || {
-            if let Err(e) = capture_loop(&target, &running, &tx) {
+            if let Err(e) = capture_loop(&target, &running, &tx, on_open) {
                 tracing::error!("captura detenida: {e}");
             }
             running.store(false, Ordering::Relaxed);
@@ -61,6 +78,7 @@ pub fn spawn_capture(
     _target: CaptureTarget,
     _running: Arc<AtomicBool>,
     _tx: SyncSender<Vec<f32>>,
+    _on_open: Option<OnOpen>,
 ) -> Result<JoinHandle<()>> {
     Err(crate::AudioError::UnsupportedPlatform)
 }
@@ -89,6 +107,7 @@ fn capture_loop(
     target: &CaptureTarget,
     running: &AtomicBool,
     tx: &SyncSender<Vec<f32>>,
+    on_open: Option<OnOpen>,
 ) -> Result<()> {
     use std::collections::VecDeque;
     use wasapi::{Direction, SampleType, StreamMode, WasapiError, WaveFormat};
@@ -108,7 +127,7 @@ fn capture_loop(
         None,
     );
 
-    let (mut client, buffer_hns) = build_client(target)?;
+    let (mut client, buffer_hns, opened) = build_client(target)?;
     let mode = StreamMode::EventsShared {
         autoconvert: true,
         buffer_duration_hns: buffer_hns,
@@ -120,7 +139,26 @@ fn capture_loop(
     let event = client.set_get_eventhandle()?;
     let capture = client.get_audiocaptureclient()?;
     client.start_stream()?;
-    tracing::info!("captura iniciada: {target:?}");
+    // El nombre, no solo el id: un id es inutil para saber que microfono se
+    // abrio de verdad cuando algo suena raro.
+    match &opened {
+        Some(o) => match &o.fallback_from {
+            Some(wanted) => tracing::warn!(
+                "captura iniciada: {} [{}] en lugar de {wanted}, que no esta conectado ({target:?})",
+                o.device_name,
+                o.device_id
+            ),
+            None => tracing::info!(
+                "captura iniciada: {} [{}] ({target:?})",
+                o.device_name,
+                o.device_id
+            ),
+        },
+        None => tracing::info!("captura iniciada: {target:?}"),
+    }
+    if let (Some(notify), Some(opened)) = (on_open, opened) {
+        notify(opened);
+    }
 
     let mut raw: VecDeque<u8> = VecDeque::with_capacity(64 * 1024);
     let mut pending: Vec<f32> = Vec::with_capacity(SEND_SAMPLES * 2);
@@ -163,9 +201,12 @@ fn capture_loop(
     Ok(())
 }
 
-/// Devuelve el cliente ya abierto y el tamano de buffer a pedirle.
+/// Devuelve el cliente ya abierto, el tamano de buffer a pedirle y, salvo en
+/// la captura por proceso (que no tiene dispositivo), que dispositivo es.
 #[cfg(windows)]
-fn build_client(target: &CaptureTarget) -> Result<(wasapi::AudioClient, i64)> {
+fn build_client(
+    target: &CaptureTarget,
+) -> Result<(wasapi::AudioClient, i64, Option<CaptureOpened>)> {
     use wasapi::{AudioClient, Direction};
 
     match target {
@@ -176,17 +217,58 @@ fn build_client(target: &CaptureTarget) -> Result<(wasapi::AudioClient, i64)> {
             // En loopback por proceso get_device_period() no funciona, y segun
             // la doc del crate el buffer que se pase da igual.
             let client = AudioClient::new_application_loopback_client(*pid, *include_children)?;
-            Ok((client, DEFAULT_BUFFER_HNS))
+            Ok((client, DEFAULT_BUFFER_HNS, None))
         }
         CaptureTarget::Loopback { device_id } => {
-            open_device(&Direction::Render, device_id.as_deref())
+            let (client, hns, opened) =
+                open_capture_device(&Direction::Render, device_id.as_deref())?;
+            Ok((client, hns, Some(opened)))
         }
         CaptureTarget::Microphone { device_id } => {
-            open_device(&Direction::Capture, device_id.as_deref())
+            let (client, hns, opened) =
+                open_capture_device(&Direction::Capture, device_id.as_deref())?;
+            Ok((client, hns, Some(opened)))
         }
     }
 }
 
+/// Abre un dispositivo para CAPTURAR. Si el id pedido ya no existe (un USB que
+/// cambio de puerto, un micro desenchufado) no falla: cae al predeterminado y
+/// lo deja dicho en `CaptureOpened::fallback_from` para que quien escuche
+/// avise. Quedarse sin transcripcion por un id de hace un mes es peor que
+/// transcribir con otro microfono y decirlo. Solo para captura: en salida
+/// (ver [`open_device`]) caer al predeterminado mandaria la voz sintetica a
+/// los altavoces en vez de al microfono virtual.
+#[cfg(windows)]
+fn open_capture_device(
+    direction: &wasapi::Direction,
+    device_id: Option<&str>,
+) -> Result<(wasapi::AudioClient, i64, CaptureOpened)> {
+    use wasapi::DeviceEnumerator;
+
+    let enumerator = DeviceEnumerator::new()?;
+    let (device, fallback_from) = match device_id {
+        None => (enumerator.get_default_device(direction)?, None),
+        Some(wanted) => match find_device(&enumerator, direction, wanted)? {
+            Some(device) => (device, None),
+            None => (
+                enumerator.get_default_device(direction)?,
+                Some(wanted.to_string()),
+            ),
+        },
+    };
+    let opened = CaptureOpened {
+        device_name: device
+            .get_friendlyname()
+            .unwrap_or_else(|_| "(unnamed)".to_string()),
+        device_id: device.get_id().unwrap_or_default(),
+        fallback_from,
+    };
+    let (client, buffer_hns) = client_for(&device)?;
+    Ok((client, buffer_hns, opened))
+}
+
+/// Abre un dispositivo exigiendo que exista: un id que no esta es error.
 #[cfg(windows)]
 pub(crate) fn open_device(
     direction: &wasapi::Direction,
@@ -197,20 +279,30 @@ pub(crate) fn open_device(
     let enumerator = DeviceEnumerator::new()?;
     let device = match device_id {
         None => enumerator.get_default_device(direction)?,
-        Some(wanted) => {
-            let collection = enumerator.get_device_collection(direction)?;
-            let mut found = None;
-            for device in &collection {
-                let device = device?;
-                if device.get_id().map(|id| id == wanted).unwrap_or(false) {
-                    found = Some(device);
-                    break;
-                }
-            }
-            found.ok_or_else(|| crate::AudioError::DeviceNotFound(wanted.to_string()))?
-        }
+        Some(wanted) => find_device(&enumerator, direction, wanted)?
+            .ok_or_else(|| crate::AudioError::DeviceNotFound(wanted.to_string()))?,
     };
+    client_for(&device)
+}
 
+#[cfg(windows)]
+fn find_device(
+    enumerator: &wasapi::DeviceEnumerator,
+    direction: &wasapi::Direction,
+    wanted: &str,
+) -> Result<Option<wasapi::Device>> {
+    let collection = enumerator.get_device_collection(direction)?;
+    for device in &collection {
+        let device = device?;
+        if device.get_id().map(|id| id == wanted).unwrap_or(false) {
+            return Ok(Some(device));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn client_for(device: &wasapi::Device) -> Result<(wasapi::AudioClient, i64)> {
     let client = device.get_iaudioclient()?;
     let buffer_hns = client
         .get_device_period()

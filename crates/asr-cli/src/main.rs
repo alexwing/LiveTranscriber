@@ -232,7 +232,15 @@ fn level(which: Which, device_id: Option<String>, seconds: u64, pid: Option<u32>
 
     let running = Arc::new(AtomicBool::new(true));
     let (tx, rx) = sync_channel::<Vec<f32>>(64);
-    let handle = spawn_capture(target, running.clone(), tx).context("starting the capture")?;
+    let announce: asr_audio::OnOpen = Box::new(|opened| match opened.fallback_from {
+        Some(wanted) => println!(
+            "device {wanted} is not connected, using {} instead",
+            opened.device_name
+        ),
+        None => println!("device: {} [{}]", opened.device_name, opened.device_id),
+    });
+    let handle = spawn_capture(target, running.clone(), tx, Some(announce))
+        .context("starting the capture")?;
 
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut blocks = 0usize;
@@ -439,6 +447,9 @@ fn run(args: RunArgs) -> Result<()> {
                 }
             }
             SessionEvent::Error { message, .. } => eprintln!("\n[error] {message}"),
+            SessionEvent::DeviceFallback { wanted, using, .. } => {
+                eprintln!("\n[warning] device {wanted} is not connected, using {using} instead")
+            }
             SessionEvent::Stopped { .. } => {
                 println!("\nthe session stopped");
                 break;

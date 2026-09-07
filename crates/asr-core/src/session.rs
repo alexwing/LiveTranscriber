@@ -105,6 +105,16 @@ pub enum SessionEvent {
         source: Source,
         message: String,
     },
+    /// El dispositivo configurado no existia y la captura ha caido al
+    /// predeterminado. `wanted` es el id que ya no esta (un USB que cambio
+    /// de puerto, un micro desenchufado); `using`, el nombre del que se abrio.
+    /// No es un error: se transcribe igual, pero con otro microfono, y eso
+    /// hay que decirlo en la ventana o nadie entiende por que reconoce peor.
+    DeviceFallback {
+        source: Source,
+        wanted: String,
+        using: String,
+    },
     /// La sesion se ha detenido del todo.
     Stopped {
         source: Source,
@@ -142,7 +152,17 @@ impl Session {
 
         let mut engine = factory.build(engine_tx)?;
 
-        let capture = spawn_capture(cfg.target.clone(), running.clone(), audio_tx)
+        let open_out = out.clone();
+        let on_open: asr_audio::OnOpen = Box::new(move |opened| {
+            if let Some(wanted) = opened.fallback_from {
+                let _ = open_out.send(SessionEvent::DeviceFallback {
+                    source,
+                    wanted,
+                    using: opened.device_name,
+                });
+            }
+        });
+        let capture = spawn_capture(cfg.target.clone(), running.clone(), audio_tx, Some(on_open))
             .map_err(|e| EngineError::Spawn(e.to_string()))?;
 
         // Estado compartido entre el reenviador (que ve el texto) y la bomba

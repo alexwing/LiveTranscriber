@@ -196,6 +196,9 @@ const es = {
   // --------------------------------------------------------------- overlay
   overlayIdle: "Esperando audio…",
   overlayHide: "Ocultar (se puede volver a abrir desde la bandeja)",
+  overlayOnlyOriginal: "Solo lo que se dice",
+  overlayOnlyTranslated: "Solo la traduccion",
+  overlayBoth: "Los dos idiomas",
 
   // --------------------------------------------------- modos de vista
   splitCombined: "Combinado: la traduccion debajo de cada parrafo",
@@ -404,6 +407,9 @@ const en: Strings = {
 
   overlayIdle: "Waiting for audio…",
   overlayHide: "Hide (you can reopen it from the tray)",
+  overlayOnlyOriginal: "Only what is being said",
+  overlayOnlyTranslated: "Only the translation",
+  overlayBoth: "Both languages",
 
   splitCombined: "Combined: the translation under each paragraph",
   splitV: "Split vertically: side by side",

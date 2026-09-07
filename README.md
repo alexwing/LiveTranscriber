@@ -408,6 +408,10 @@ hidden at startup. It shows the last 2 closed lines, the live partial from both 
 merged, and below it in a different color the translations, which arrive one sentence
 behind. Drag it to move it; it has its own close button.
 
+When translation is on, a small switch in its top-right corner picks what to show: only
+what is being said, only the translation, or both — labelled with the language codes from
+your configuration (`EN`, `ES`, `EN+ES`). The choice is remembered between sessions.
+
 Open it from the **Subtitles** button on the Transcript tab, from the tray menu, or with
 `Ctrl+Shift+O`. Set `overlay_enabled = true` in the TOML and it appears on startup.
 
